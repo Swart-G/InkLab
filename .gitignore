@@ -1,0 +1,15 @@
+.gradle/
+build/
+**/build/
+
+# Local Android/IDE files
+.idea/
+*.iml
+local.properties
+
+# Generated APKs and bundles
+*.apk
+*.aab
+
+# OS files
+.DS_Store
