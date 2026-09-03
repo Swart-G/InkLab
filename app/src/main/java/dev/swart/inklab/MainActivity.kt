@@ -3,6 +3,8 @@ package dev.swart.inklab
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.compose.runtime.SideEffect
+import androidx.core.view.WindowCompat
 import androidx.lifecycle.viewmodel.compose.viewModel
 import dev.swart.inklab.ui.EditorViewModel
 import dev.swart.inklab.ui.InkLabApp
@@ -13,7 +15,14 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         setContent {
             val vm: EditorViewModel = viewModel()
-            InkLabTheme(darkTheme = vm.inputPreferences.darkTheme) { InkLabApp(vm) }
+            val darkTheme = vm.inputPreferences.darkTheme
+            SideEffect {
+                WindowCompat.getInsetsController(window, window.decorView).apply {
+                    isAppearanceLightStatusBars = !darkTheme
+                    isAppearanceLightNavigationBars = !darkTheme
+                }
+            }
+            InkLabTheme(darkTheme = darkTheme) { InkLabApp(vm) }
         }
     }
 }

@@ -10,6 +10,14 @@ on:
       - THIRD_PARTY_NOTICES.md
       - .github/workflows/publish-preview.yml
       - .github/release-notes.md
+  pull_request:
+    branches:
+      - main
+    paths:
+      - app/**
+      - README.md
+      - THIRD_PARTY_NOTICES.md
+      - .github/workflows/publish-preview.yml
 
 permissions:
   contents: write
@@ -35,9 +43,11 @@ jobs:
         run: ./gradlew clean testDebugUnitTest lintDebug assembleDebug
 
       - name: Prepare APK
+        if: github.event_name == 'push'
         run: cp app/build/outputs/apk/debug/app-debug.apk InkLab-preview-arm64.apk
 
       - name: Publish preview release
+        if: github.event_name == 'push'
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: inklab-preview
