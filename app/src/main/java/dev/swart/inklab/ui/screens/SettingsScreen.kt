@@ -1,5 +1,6 @@
 package dev.swart.inklab.ui.screens
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -34,6 +35,7 @@ import dev.swart.inklab.ui.theme.InkColors
 
 @Composable
 fun SettingsScreen(vm: EditorViewModel, onBack: () -> Unit) {
+    BackHandler(onBack = onBack)
     val preferences = vm.inputPreferences
     Column(Modifier.fillMaxSize().background(InkColors.Paper).padding(24.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -63,8 +65,12 @@ fun SettingsScreen(vm: EditorViewModel, onBack: () -> Unit) {
                 }
             }
             item {
-                SettingsCard("Рисование", "Аккуратные линии без лишних режимов") {
-                    SettingSwitch("Автораспознавание фигур", "Выпрямлять линии, окружности и прямоугольники", preferences.autoShapes) {
+                SettingsCard("Рисование", "Аккуратные фигуры без отдельного режима") {
+                    SettingSwitch(
+                        "Исправление фигур",
+                        "Удерживайте стилус в конце штриха примерно полсекунды, чтобы выправить линию, окружность или прямоугольник",
+                        preferences.autoShapes
+                    ) {
                         vm.updateInputPreferences(preferences.copy(autoShapes = it))
                     }
                 }
@@ -80,7 +86,7 @@ fun SettingsScreen(vm: EditorViewModel, onBack: () -> Unit) {
                             )
                         }
                     }
-                    Text("Размер · ${preferences.eraserRadius.toInt()} dp", color = InkColors.Muted)
+                    Text("Размер · ${preferences.eraserRadius.toInt()}", color = InkColors.Muted)
                     Slider(
                         value = preferences.eraserRadius,
                         onValueChange = { vm.updateInputPreferences(preferences.copy(eraserRadius = it)) },
@@ -91,7 +97,7 @@ fun SettingsScreen(vm: EditorViewModel, onBack: () -> Unit) {
             }
             item {
                 SettingsCard("Оформление", "Комфортный вид днём и вечером") {
-                    SettingSwitch("Тёмная тема", "Тёмный интерфейс с сохранением цвета бумаги", preferences.darkTheme) {
+                    SettingSwitch("Тёмная тема", "Тёмный интерфейс с сохранением выбранного цвета бумаги", preferences.darkTheme) {
                         vm.updateInputPreferences(preferences.copy(darkTheme = it))
                     }
                 }

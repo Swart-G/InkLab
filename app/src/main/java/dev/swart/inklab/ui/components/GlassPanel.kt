@@ -23,7 +23,7 @@ fun GlassPanel(
         modifier = modifier
             .shadow(16.dp, shape, ambientColor = Color.Black.copy(alpha = 0.08f), spotColor = Color.Black.copy(alpha = 0.08f))
             .background(InkColors.PaperRaised.copy(alpha = 0.96f), shape)
-            .border(1.dp, Color.White.copy(alpha = 0.72f), shape)
+            .border(1.dp, InkColors.Line.copy(alpha = 0.88f), shape)
             .padding(8.dp),
         content = content
     )

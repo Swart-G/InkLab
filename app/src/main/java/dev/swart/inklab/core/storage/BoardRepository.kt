@@ -21,17 +21,15 @@ import java.util.UUID
 
 class BoardRepository(context: Context) {
     private val file = File(context.filesDir, "boards.json")
+    private val backupFile = File(context.filesDir, "boards.json.bak")
     private val foldersFile = File(context.filesDir, "folders.json")
+    private val foldersBackupFile = File(context.filesDir, "folders.json.bak")
 
-    fun load(): List<InkBoard> = runCatching {
-        if (!file.exists()) return emptyList()
-        val root = JSONArray(file.readText())
+    fun load(): List<InkBoard> = loadArray(file, backupFile) { root ->
         List(root.length()) { index -> root.getJSONObject(index).toBoard() }
-    }.getOrDefault(emptyList())
+    }
 
-    fun loadFolders(): List<InkFolder> = runCatching {
-        if (!foldersFile.exists()) return emptyList()
-        val root = JSONArray(foldersFile.readText())
+    fun loadFolders(): List<InkFolder> = loadArray(foldersFile, foldersBackupFile) { root ->
         List(root.length()) { index ->
             val item = root.getJSONObject(index)
             InkFolder(
@@ -42,7 +40,16 @@ class BoardRepository(context: Context) {
                 updatedAt = item.optLong("updatedAt", System.currentTimeMillis())
             )
         }
-    }.getOrDefault(emptyList())
+    }
+
+    private fun <T> loadArray(primary: File, backup: File, parser: (JSONArray) -> List<T>): List<T> {
+        for (candidate in listOf(primary, backup)) {
+            if (!candidate.isFile) continue
+            val parsed = runCatching { parser(JSONArray(candidate.readText())) }.getOrNull()
+            if (parsed != null) return parsed
+        }
+        return emptyList()
+    }
 
     @Synchronized
     fun save(boards: List<InkBoard>) {
@@ -67,12 +74,15 @@ class BoardRepository(context: Context) {
     }
 
     private fun writeAtomic(target: File, content: String) {
+        target.parentFile?.mkdirs()
         val temporary = File(target.parentFile, "${target.name}.tmp")
         temporary.writeText(content)
-        check(temporary.renameTo(target) || run {
+        if (!temporary.renameTo(target)) {
             temporary.copyTo(target, overwrite = true)
-            temporary.delete()
-        })
+            check(temporary.delete() || !temporary.exists()) { "Could not remove temporary ${temporary.name}" }
+        }
+        val backup = File(target.parentFile, "${target.name}.bak")
+        runCatching { target.copyTo(backup, overwrite = true) }
     }
 
     private fun InkBoard.toJson() = JSONObject().apply {
@@ -197,7 +207,6 @@ class BoardRepository(context: Context) {
                 )
             }
         } else {
-            // Migration from preview builds where every document contained one implicit page.
             val strokesJson = optJSONArray("strokes") ?: JSONArray()
             listOf(
                 InkPage(

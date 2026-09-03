@@ -1,7 +1,5 @@
 name: Publish InkLab Preview
 
-# Pull requests run verification only; publishing remains exclusive to main.
-
 on:
   push:
     branches:
@@ -41,12 +39,21 @@ jobs:
       - name: Set up Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Test, lint and build
-        run: ./gradlew clean testDebugUnitTest lintDebug assembleDebug
+      - name: Test, lint and build signed release
+        run: ./gradlew clean testDebugUnitTest lintRelease assembleRelease
+
+      - name: Verify release signature
+        run: |
+          APK="app/build/outputs/apk/release/app-release.apk"
+          APKSIGNER="$(find "$ANDROID_HOME/build-tools" -type f -name apksigner | sort -V | tail -n 1)"
+          test -x "$APKSIGNER"
+          "$APKSIGNER" verify --verbose --print-certs "$APK"
 
       - name: Prepare APK
         if: github.event_name == 'push'
-        run: cp app/build/outputs/apk/debug/app-debug.apk InkLab-preview-arm64.apk
+        run: |
+          cp app/build/outputs/apk/release/app-release.apk InkLab-preview-arm64.apk
+          sha256sum InkLab-preview-arm64.apk > InkLab-preview-arm64.apk.sha256
 
       - name: Publish preview release
         if: github.event_name == 'push'
@@ -56,7 +63,7 @@ jobs:
         run: |
           git tag --force "$RELEASE_TAG" "$GITHUB_SHA"
           git push --force origin "refs/tags/$RELEASE_TAG"
-          gh release upload "$RELEASE_TAG" InkLab-preview-arm64.apk --clobber
+          gh release upload "$RELEASE_TAG" InkLab-preview-arm64.apk InkLab-preview-arm64.apk.sha256 --clobber
           gh release edit "$RELEASE_TAG" \
             --title "InkLab Preview" \
             --notes-file .github/release-notes.md \

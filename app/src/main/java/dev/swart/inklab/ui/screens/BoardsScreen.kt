@@ -1,10 +1,12 @@
 package dev.swart.inklab.ui.screens
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
@@ -68,18 +70,32 @@ fun BoardsScreen(vm: EditorViewModel, onBack: () -> Unit) {
     var creatingFolder by remember { mutableStateOf(false) }
 
     val currentFolder = currentFolderId?.let { id -> vm.folders.firstOrNull { it.id == id } }
-    val visibleFolders = vm.folders.filter { it.parentId == currentFolderId }
-    val visibleBoards = vm.boards.filter { it.folderId == currentFolderId }
+    val visibleFolders = vm.folders.filter { it.parentId == currentFolderId }.sortedByDescending { it.updatedAt }
+    val visibleBoards = vm.boards.filter { it.folderId == currentFolderId }.sortedByDescending { it.updatedAt }
+    val breadcrumb = generateSequence(currentFolder) { folder ->
+        folder.parentId?.let { parentId -> vm.folders.firstOrNull { it.id == parentId } }
+    }.toList().asReversed().joinToString(" / ") { it.title }
+
+    fun goBack() {
+        if (currentFolder != null) {
+            currentFolderId = currentFolder.parentId
+        } else if (vm.currentBoard != null) {
+            onBack()
+        }
+    }
+
+    val canGoBack = currentFolder != null || vm.currentBoard != null
+    BackHandler(enabled = canGoBack) { goBack() }
 
     Box(Modifier.fillMaxSize().background(InkColors.Paper)) {
         Column(Modifier.fillMaxSize().padding(24.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                IconButton(onClick = {
-                    if (currentFolder != null) currentFolderId = currentFolder.parentId else if (vm.currentBoard != null) onBack()
-                }) { Icon(Icons.Outlined.ArrowBack, "Назад") }
-                Column(Modifier.padding(start = 8.dp)) {
+                if (canGoBack) {
+                    IconButton(onClick = ::goBack) { Icon(Icons.Outlined.ArrowBack, "Назад") }
+                }
+                Column(Modifier.padding(start = if (canGoBack) 8.dp else 0.dp)) {
                     Text("Файлы", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.SemiBold)
-                    if (currentFolder != null) Text(currentFolder.title, color = InkColors.Muted, style = MaterialTheme.typography.bodySmall)
+                    if (breadcrumb.isNotEmpty()) Text(breadcrumb, color = InkColors.Muted, style = MaterialTheme.typography.bodySmall)
                 }
             }
             Spacer(Modifier.height(22.dp))
@@ -96,6 +112,7 @@ fun BoardsScreen(vm: EditorViewModel, onBack: () -> Unit) {
             } else {
                 LazyVerticalGrid(
                     columns = GridCells.Adaptive(230.dp),
+                    contentPadding = PaddingValues(bottom = 92.dp),
                     horizontalArrangement = Arrangement.spacedBy(16.dp),
                     verticalArrangement = Arrangement.spacedBy(16.dp)
                 ) {
@@ -172,6 +189,7 @@ private fun BoardCard(
     onDelete: () -> Unit
 ) {
     val strokeCount = board.pages.sumOf { it.strokes.size }
+    val updated = DateFormat.getDateInstance(DateFormat.MEDIUM).format(Date(board.updatedAt))
     var menu by remember { mutableStateOf(false) }
     var rename by remember { mutableStateOf(false) }
     var delete by remember { mutableStateOf(false) }
@@ -203,9 +221,10 @@ private fun BoardCard(
                 Column(Modifier.weight(1f)) {
                     Text(board.title, fontWeight = FontWeight.SemiBold, maxLines = 1)
                     Text(
-                        if (board.format == DocumentFormat.NOTEBOOK) "Тетрадь" else DateFormat.getDateInstance(DateFormat.MEDIUM).format(Date(board.updatedAt)),
+                        "${if (board.format == DocumentFormat.NOTEBOOK) "Тетрадь" else "Доска"} · $updated",
                         color = InkColors.Muted,
-                        style = MaterialTheme.typography.bodySmall
+                        style = MaterialTheme.typography.bodySmall,
+                        maxLines = 1
                     )
                 }
                 Box {
@@ -322,7 +341,7 @@ private fun NameDialog(title: String, initial: String, confirm: String, dismiss:
 @Composable
 private fun CreateDocumentDialog(vm: EditorViewModel, initialFormat: DocumentFormat, folderId: String?, dismiss: () -> Unit) {
     var title by remember { mutableStateOf("") }
-    var format by remember(initialFormat) { mutableStateOf(initialFormat) }
+    val format = initialFormat
     var orientation by remember { mutableStateOf(PageOrientation.PORTRAIT) }
     var pattern by remember { mutableStateOf(PaperPattern.RULED) }
     AlertDialog(

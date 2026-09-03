@@ -6,6 +6,12 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+val ciVersionCode = System.getenv("GITHUB_RUN_NUMBER")
+    ?.toIntOrNull()
+    ?.coerceAtLeast(2)
+    ?: 2
+val releaseKeyPassword = "InkLabPreviewRelease2026"
+
 android {
     namespace = "dev.swart.inklab"
     compileSdk = 36
@@ -14,10 +20,27 @@ android {
         applicationId = "dev.swart.inklab"
         minSdk = 24
         targetSdk = 36
-        versionCode = 1
+        versionCode = ciVersionCode
         versionName = "preview"
         vectorDrawables.useSupportLibrary = true
         ndk.abiFilters += "arm64-v8a"
+    }
+
+    signingConfigs {
+        create("release") {
+            storeFile = file("inklab-release.jks")
+            storePassword = releaseKeyPassword
+            keyAlias = "inklab"
+            keyPassword = releaseKeyPassword
+        }
+    }
+
+    buildTypes {
+        getByName("release") {
+            isDebuggable = false
+            isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("release")
+        }
     }
 
     buildFeatures {
@@ -95,11 +118,7 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.10.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
     implementation("com.microsoft.onnxruntime:onnxruntime-android:1.29.0")
-
-    // Real local handwriting recognizer. Language models are downloaded on-device.
     implementation("com.google.mlkit:digital-ink-recognition:19.0.0")
-
-    // Offline LaTeX renderer for converted formula objects.
     implementation("ru.noties:jlatexmath-android:0.2.0")
 
     debugImplementation("androidx.compose.ui:ui-tooling")

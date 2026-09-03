@@ -25,6 +25,7 @@ import java.io.File
 import java.nio.FloatBuffer
 import java.nio.LongBuffer
 import kotlin.math.max
+import kotlin.math.min
 
 class Pix2TextMathProvider : RecognitionProvider {
     override val id = "pix2text-math"
@@ -67,13 +68,14 @@ class Pix2TextMathProvider : RecognitionProvider {
         mode: RecognitionMode
     ): RecognitionResult = withContext(Dispatchers.Default) {
         require(mode == RecognitionMode.MATH)
-        check(strokes.isNotEmpty()) { "Нет штрихов для распознавания" }
+        val drawableStrokes = strokes.filter { it.points.isNotEmpty() }
+        check(drawableStrokes.isNotEmpty()) { "Нет штрихов для распознавания" }
         val store = ModelPackageStore(context)
         if (!store.isInstalled(ModelCatalog.pix2Text)) prepare(context).getOrThrow()
         val activeEngine = engine ?: synchronized(this@Pix2TextMathProvider) {
             engine ?: Engine(store.directory(ModelCatalog.pix2Text)).also { engine = it }
         }
-        val bitmap = rasterize(strokes)
+        val bitmap = rasterize(drawableStrokes)
         val started = System.currentTimeMillis()
         val latex = try {
             activeEngine.recognize(bitmap)
@@ -99,8 +101,9 @@ class Pix2TextMathProvider : RecognitionProvider {
         val padding = max(14f, max(contentWidth, contentHeight) * 0.12f)
         val sourceWidth = contentWidth + padding * 2f
         val sourceHeight = contentHeight + padding * 2f
-        val sx = IMAGE_SIZE / sourceWidth
-        val sy = IMAGE_SIZE / sourceHeight
+        val scale = min(IMAGE_SIZE / sourceWidth, IMAGE_SIZE / sourceHeight)
+        val originX = (IMAGE_SIZE - sourceWidth * scale) / 2f
+        val originY = (IMAGE_SIZE - sourceHeight * scale) / 2f
 
         return Bitmap.createBitmap(IMAGE_SIZE, IMAGE_SIZE, Bitmap.Config.ARGB_8888).also { bitmap ->
             val canvas = Canvas(bitmap)
@@ -113,11 +116,11 @@ class Pix2TextMathProvider : RecognitionProvider {
             }
             strokes.forEach { stroke ->
                 if (stroke.points.size < 2) return@forEach
-                paint.strokeWidth = max(2f, stroke.width * (sx + sy) / 2f)
+                paint.strokeWidth = max(2f, stroke.width * scale)
                 val path = Path()
                 stroke.points.forEachIndexed { index, point ->
-                    val x = (point.x - left + padding) * sx
-                    val y = (point.y - top + padding) * sy
+                    val x = originX + (point.x - left + padding) * scale
+                    val y = originY + (point.y - top + padding) * scale
                     if (index == 0) path.moveTo(x, y) else path.lineTo(x, y)
                 }
                 canvas.drawPath(path, paint)
