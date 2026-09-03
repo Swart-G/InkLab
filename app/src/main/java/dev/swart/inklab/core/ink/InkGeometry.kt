@@ -92,13 +92,20 @@ fun autoRecognizeShape(stroke: InkStroke): InkStroke {
     if (!closed || width < 38f || height < 38f) return stroke
 
     val rectanglePerimeter = 2f * (width + height)
+    val corners = listOf(
+        Offset(bounds.left, bounds.top), Offset(bounds.right, bounds.top),
+        Offset(bounds.right, bounds.bottom), Offset(bounds.left, bounds.bottom)
+    )
+    val visitsEveryCorner = corners.all { corner ->
+        points.any { (it.offset() - corner).getDistance() < diagonal * 0.14f }
+    }
     val nearEdgeRatio = points.count { point ->
         minOf(
             abs(point.x - bounds.left), abs(point.x - bounds.right),
             abs(point.y - bounds.top), abs(point.y - bounds.bottom)
         ) < diagonal * 0.055f
     }.toFloat() / points.size
-    if (nearEdgeRatio > 0.72f && pathLength / rectanglePerimeter in 0.72f..1.38f) {
+    if (visitsEveryCorner && nearEdgeRatio > 0.72f && pathLength / rectanglePerimeter in 0.72f..1.38f) {
         val time = points.first().timestamp
         val pressure = points.map { it.pressure }.average().toFloat()
         return stroke.copy(points = listOf(
