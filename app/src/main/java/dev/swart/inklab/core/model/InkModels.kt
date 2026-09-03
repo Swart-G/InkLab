@@ -21,8 +21,21 @@ data class InkStroke(
     val color: Color = Color(0xFF25272C)
 )
 
-data class SelectionState(
-    val selectedIds: Set<String> = emptySet(),
-    val lasso: List<Offset> = emptyList(),
-    val active: Boolean = false
+enum class PaperPattern { RULED, GRID, DOTS, BLANK }
+
+data class BoardSettings(
+    val pattern: PaperPattern = PaperPattern.RULED,
+    val spacing: Float = 36f,
+    val paperColor: Long = 0xFFFBF9F5,
+    val showMargin: Boolean = false
+)
+
+data class InkBoard(
+    val id: String = UUID.randomUUID().toString(),
+    val title: String = "Новая доска",
+    val subject: String = "",
+    val createdAt: Long = System.currentTimeMillis(),
+    val updatedAt: Long = System.currentTimeMillis(),
+    val settings: BoardSettings = BoardSettings(),
+    val strokes: List<InkStroke> = emptyList()
 )

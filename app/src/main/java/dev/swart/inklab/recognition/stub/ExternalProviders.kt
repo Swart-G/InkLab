@@ -51,12 +51,4 @@ fun externalProviders() = listOf(
         requiredState = ProviderState.SDK_REQUIRED,
         setupHint = "Добавьте iink SDK + math resources. См. integrations/MYSCRIPT.md"
     ),
-    ExternalProvider(
-        id = "onnx-math",
-        displayName = "ONNX Formula → LaTeX",
-        subtitle = "Формулы · bitmap · локальные веса",
-        capabilities = RecognitionCapabilities(text = false, math = true, acceptsStrokes = false, acceptsBitmap = true),
-        requiredState = ProviderState.MODEL_REQUIRED,
-        setupHint = "Добавьте encoder-decoder ONNX веса и vocabulary. См. integrations/ONNX.md"
-    )
 )

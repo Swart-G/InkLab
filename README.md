@@ -1,47 +1,64 @@
 # InkLab
 
-Android tablet playground for comparing local handwriting recognition engines on the **same vector ink selection**.
+Локальная Android-лаборатория рукописных конспектов и OCR, ориентированная на планшет и стилус.
 
-## UX
-- Draw naturally with pen/stylus.
-- Switch to lasso and circle handwriting.
-- A floating action bar appears with **В текст**, **Формула**, and **Compare**.
-- Text and math engines are selected independently in Settings.
-- Recognition result shows engine ID and latency.
-- OCR Lab exposes every registered provider and its setup state.
+## Что уже работает
 
-## Implemented
-- Kotlin + Jetpack Compose tablet UI.
-- Custom paper canvas, vector strokes, eraser and lasso selection.
-- Google ML Kit Digital Ink `ru-RU` provider. The model downloads to device on demand; recognition then runs locally.
-- Provider registry and capability model.
-- Integration slots for MyScript Text, MyScript Math, Russian ONNX HTR and ONNX Formula→LaTeX.
+- Векторное письмо с сохранением pressure и сглаживанием редких событий стилуса.
+- Независимое поведение S Pen, боковой кнопки и пальца.
+- Защита от ладони; палец по умолчанию перемещает и масштабирует холст.
+- Пиксельный ластик, который разрезает штрих, и быстрый ластик целых штрихов.
+- Лассо с заметной рамкой, перемещением, дублированием и удалением выделения.
+- Undo/redo на уровне операций.
+- Несколько локальных досок, автосохранение, название/предмет и четыре вида бумаги.
+- Отдельный выбор движков для текста и формул.
+- Русский рукописный текст через Google ML Kit Digital Ink (`ru`), локально после загрузки модели.
+- Формулы в LaTeX через Pix2Text MFR и ONNX Runtime Android, локально после загрузки пакета (~31 МБ).
+- Встроенный менеджер моделей с прогрессом, проверкой размера и SHA-256, удалением пакетов.
 
-## Why vector ink
-Online handwriting SDKs need stroke order/timing, while image OCR needs raster input. InkLab stores the source as vector strokes, so a future rasterizer can feed ONNX without losing the original ink required by ML Kit/MyScript.
+## Управление
 
-## Build requirements
-- Android Studio compatible with API 37 / AGP 9.1.x.
-- Android SDK Platform 37.
-- JDK 17+.
-- Internet once for Gradle dependencies and the ML Kit Russian model.
+- Выберите перо, ластик или лассо в плавающей панели слева.
+- Повторное нажатие по активному инструменту открывает его параметры.
+- Кончик S Pen использует выбранный инструмент; боковая кнопка по умолчанию временно включает ластик.
+- Обратная сторона совместимого стилуса всегда работает как ластик.
+- Палец по умолчанию двигает холст; жест двумя пальцами меняет масштаб.
+- Обведите рукопись лассо и нажмите **В текст** или **Формула**.
 
-The archive contains wrapper scripts/properties. If `gradle-wrapper.jar` is absent in your environment, open the project in Android Studio and regenerate the Gradle wrapper (`gradle wrapper --gradle-version 9.3.1`) or use the IDE's Gradle installation.
+## Локальные модели
 
-## Important limitations of this first test build
-- MyScript is not redistributed because its SDK/resources require a MyScript developer package/license.
-- ONNX weights/tokenizers are not bundled; adapter slots and setup docs are included.
-- Formula objects are currently previewed as LaTeX text once a real formula provider is connected; a KaTeX/native renderer is the next UI step.
-- Persistence/Room and full undo/redo are intentionally deferred until OCR engine benchmarking is stable.
+| Движок | Назначение | Доставка | После установки |
+|---|---|---|---|
+| Google Digital Ink | русский рукописный текст | загрузка из приложения, около 20 МБ | offline |
+| Pix2Text MFR int8 | изображение формулы → LaTeX | загрузка из приложения, 31.1 МБ | offline |
+| MyScript iink | текст и математика | требуется собственный лицензированный SDK/resources | offline |
 
-## Structure
+Pix2Text загружается из закреплённого commit источника, а каждый файл проверяется по SHA-256. Большие веса не лежат в APK: это сохраняет небольшой размер установки и позволяет удалять их из настроек.
+
+MyScript нельзя легально публиковать вместе с открытым репозиторием без пакета и лицензии разработчика. Адаптеры оставлены видимыми как интеграционные точки; инструкция находится в `integrations/MYSCRIPT.md`.
+
+## Сборка
+
+Требуются Android Studio/Android SDK 36, JDK 17+ и интернет для первого разрешения Gradle-зависимостей.
+
+```bash
+./gradlew testDebugUnitTest assembleDebug
 ```
-core/model/              vector ink data
-core/recognition/        provider contracts + registry
-recognition/mlkit/       working Russian Digital Ink adapter
-recognition/stub/        declared external engines/setup states
-ui/screens/              editor, settings, OCR lab
-ui/components/           reusable floating panels
-integrations/            MyScript and ONNX hookup notes
+
+Gradle wrapper JAR включён в репозиторий. Минимальная версия Android — API 24 из-за ONNX Runtime Android.
+Сборка ограничена `arm64-v8a`, чтобы не раздувать APK несколькими копиями нативного ONNX Runtime; это соответствует современным Android-планшетам.
+
+## Структура
+
+```text
+core/ink/               геометрия лассо и ластика
+core/model/             штрихи, доски и параметры бумаги
+core/models/            каталог и безопасная загрузка весов
+core/storage/           локальное хранение досок и настроек ввода
+core/recognition/       контракты и реестр движков
+recognition/mlkit/      русский Digital Ink
+recognition/onnx/       Pix2Text Formula → LaTeX
+ui/screens/             редактор, доски, настройки и OCR Lab
 ```
-# InkLab
+
+Сторонние компоненты и происхождение весов перечислены в `THIRD_PARTY_NOTICES.md`.

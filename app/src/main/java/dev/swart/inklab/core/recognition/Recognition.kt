@@ -29,8 +29,11 @@ interface RecognitionProvider {
     val displayName: String
     val subtitle: String
     val capabilities: RecognitionCapabilities
+    val downloadSizeBytes: Long? get() = null
+    val licenseLabel: String? get() = null
     fun state(context: Context): ProviderState
-    suspend fun prepare(context: Context): Result<Unit> = Result.success(Unit)
+    suspend fun prepare(context: Context, onProgress: (Float) -> Unit = {}): Result<Unit> = Result.success(Unit)
+    suspend fun remove(context: Context): Result<Unit> = Result.success(Unit)
     suspend fun recognize(context: Context, strokes: List<InkStroke>, mode: RecognitionMode): RecognitionResult
 }
 

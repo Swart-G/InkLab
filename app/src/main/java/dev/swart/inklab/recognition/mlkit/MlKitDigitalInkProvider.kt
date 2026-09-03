@@ -8,6 +8,8 @@ import com.google.mlkit.vision.digitalink.recognition.DigitalInkRecognitionModel
 import com.google.mlkit.vision.digitalink.recognition.DigitalInkRecognitionModelIdentifier
 import com.google.mlkit.vision.digitalink.recognition.DigitalInkRecognizerOptions
 import com.google.mlkit.vision.digitalink.recognition.Ink
+import com.google.mlkit.vision.digitalink.recognition.RecognitionContext
+import com.google.mlkit.vision.digitalink.recognition.WritingArea
 import dev.swart.inklab.core.model.InkStroke
 import dev.swart.inklab.core.recognition.*
 import kotlinx.coroutines.suspendCancellableCoroutine
@@ -21,6 +23,8 @@ class MlKitDigitalInkProvider : RecognitionProvider {
     override val capabilities = RecognitionCapabilities(
         text = true, math = false, acceptsStrokes = true, russian = true
     )
+    override val downloadSizeBytes = 20L * 1024L * 1024L
+    override val licenseLabel = "Google ML Kit Terms"
 
     private val modelIdentifier by lazy {
         DigitalInkRecognitionModelIdentifier.fromLanguageTag("ru-RU")
@@ -31,15 +35,33 @@ class MlKitDigitalInkProvider : RecognitionProvider {
         DigitalInkRecognitionModel.builder(modelIdentifier).build()
     }
 
-    override fun state(context: Context): ProviderState = ProviderState.MODEL_REQUIRED
+    override fun state(context: Context): ProviderState =
+        if (context.getSharedPreferences("models", Context.MODE_PRIVATE).getBoolean(id, false)) {
+            ProviderState.READY
+        } else {
+            ProviderState.MODEL_REQUIRED
+        }
 
-    override suspend fun prepare(context: Context): Result<Unit> = runCatching {
+    override suspend fun prepare(context: Context, onProgress: (Float) -> Unit): Result<Unit> = runCatching {
+        onProgress(0.05f)
         val manager = RemoteModelManager.getInstance()
         suspendCancellableCoroutine { cont ->
             manager.download(model, DownloadConditions.Builder().build())
                 .addOnSuccessListener { if (cont.isActive) cont.resume(Unit) }
                 .addOnFailureListener { if (cont.isActive) cont.resumeWithException(it) }
         }
+        context.getSharedPreferences("models", Context.MODE_PRIVATE).edit().putBoolean(id, true).apply()
+        onProgress(1f)
+    }
+
+    override suspend fun remove(context: Context): Result<Unit> = runCatching {
+        val manager = RemoteModelManager.getInstance()
+        suspendCancellableCoroutine { cont ->
+            manager.deleteDownloadedModel(model)
+                .addOnSuccessListener { if (cont.isActive) cont.resume(Unit) }
+                .addOnFailureListener { if (cont.isActive) cont.resumeWithException(it) }
+        }
+        context.getSharedPreferences("models", Context.MODE_PRIVATE).edit().putBoolean(id, false).apply()
     }
 
     override suspend fun recognize(
@@ -59,9 +81,15 @@ class MlKitDigitalInkProvider : RecognitionProvider {
         val recognizer = DigitalInkRecognition.getClient(
             DigitalInkRecognizerOptions.builder(model).build()
         )
+        val points = strokes.flatMap { it.points }
+        val writingArea = WritingArea(
+            (points.maxOf { it.x } - points.minOf { it.x }).coerceAtLeast(1f),
+            (points.maxOf { it.y } - points.minOf { it.y }).coerceAtLeast(1f)
+        )
+        val recognitionContext = RecognitionContext.builder().setWritingArea(writingArea).build()
         val started = System.currentTimeMillis()
         val response = suspendCancellableCoroutine { cont ->
-            recognizer.recognize(ink)
+            recognizer.recognize(ink, recognitionContext)
                 .addOnSuccessListener { if (cont.isActive) cont.resume(it) }
                 .addOnFailureListener { if (cont.isActive) cont.resumeWithException(it) }
         }

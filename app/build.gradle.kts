@@ -9,11 +9,12 @@ android {
 
     defaultConfig {
         applicationId = "dev.swart.inklab"
-        minSdk = 23
+        minSdk = 24
         targetSdk = 36
         versionCode = 1
-        versionName = "0.1.0"
+        versionName = "preview"
         vectorDrawables.useSupportLibrary = true
+        ndk.abiFilters += "arm64-v8a"
     }
 
     buildFeatures {
@@ -36,12 +37,14 @@ dependencies {
     implementation("androidx.compose.material:material-icons-extended")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.10.0")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.10.0")
-    implementation("androidx.datastore:datastore-preferences:1.2.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.29.0")
 
     // Real local handwriting recognizer. Language models are downloaded on-device.
     implementation("com.google.mlkit:digital-ink-recognition:19.0.0")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
     debugImplementation("androidx.compose.ui:ui-test-manifest")
+
+    testImplementation("junit:junit:4.13.2")
 }
