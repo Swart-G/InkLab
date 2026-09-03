@@ -279,7 +279,7 @@ private fun PenOptions(vm: EditorViewModel) {
     Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Text("Перо", fontWeight = FontWeight.SemiBold)
         Row(horizontalArrangement = Arrangement.spacedBy(9.dp)) {
-            penPalette.forEach { ColorDot(it, vm.penColor, 28.dp) { vm.setPenColor(it) } }
+            penPalette.forEach { ColorDot(it, vm.penColor, 28.dp) { vm.choosePenColor(it) } }
         }
         Text("Толщина · ${vm.penWidth.toInt()}", color = InkColors.Muted, style = MaterialTheme.typography.bodySmall)
         Slider(vm.penWidth, { vm.penWidth = it }, valueRange = 2f..12f, steps = 9)

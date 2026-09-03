@@ -249,7 +249,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         inputRepository.save(value)
     }
 
-    fun setPenColor(color: Color) {
+    fun choosePenColor(color: Color) {
         penColor = color
         updateInputPreferences(inputPreferences.copy(penColor = color.toArgb()))
     }
