@@ -14,5 +14,8 @@ local.properties
 *.hprof
 *.hprof.*
 
+# Downloaded and verified by the Gradle packaging task
+/app/src/main/assets/ocr/pix2text-mfr/
+
 # OS files
 .DS_Store

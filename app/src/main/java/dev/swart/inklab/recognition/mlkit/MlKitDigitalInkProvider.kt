@@ -19,7 +19,7 @@ import kotlin.coroutines.resumeWithException
 class MlKitDigitalInkProvider : RecognitionProvider {
     override val id = "mlkit-ru"
     override val displayName = "Google Digital Ink"
-    override val subtitle = "Русский · штрихи · локально после загрузки"
+    override val subtitle = "Русский · SDK встроен · локально после загрузки модели"
     override val capabilities = RecognitionCapabilities(
         text = true, math = false, acceptsStrokes = true, russian = true
     )
@@ -45,11 +45,24 @@ class MlKitDigitalInkProvider : RecognitionProvider {
     override suspend fun prepare(context: Context, onProgress: (Float) -> Unit): Result<Unit> = runCatching {
         onProgress(0.05f)
         val manager = RemoteModelManager.getInstance()
-        suspendCancellableCoroutine { cont ->
-            manager.download(model, DownloadConditions.Builder().build())
-                .addOnSuccessListener { if (cont.isActive) cont.resume(Unit) }
+        var downloaded = suspendCancellableCoroutine { cont ->
+            manager.isModelDownloaded(model)
+                .addOnSuccessListener { if (cont.isActive) cont.resume(it) }
                 .addOnFailureListener { if (cont.isActive) cont.resumeWithException(it) }
         }
+        if (!downloaded) {
+            suspendCancellableCoroutine { cont ->
+                manager.download(model, DownloadConditions.Builder().build())
+                    .addOnSuccessListener { if (cont.isActive) cont.resume(Unit) }
+                    .addOnFailureListener { if (cont.isActive) cont.resumeWithException(it) }
+            }
+            downloaded = suspendCancellableCoroutine { cont ->
+                manager.isModelDownloaded(model)
+                    .addOnSuccessListener { if (cont.isActive) cont.resume(it) }
+                    .addOnFailureListener { if (cont.isActive) cont.resumeWithException(it) }
+            }
+        }
+        check(downloaded) { "ML Kit не подтвердил установку русской модели" }
         context.getSharedPreferences("models", Context.MODE_PRIVATE).edit().putBoolean(id, true).apply()
         onProgress(1f)
     }
@@ -70,6 +83,8 @@ class MlKitDigitalInkProvider : RecognitionProvider {
         mode: RecognitionMode
     ): RecognitionResult {
         require(mode == RecognitionMode.TEXT)
+        check(strokes.any { it.points.isNotEmpty() }) { "Нет штрихов для распознавания" }
+        prepare(context).getOrThrow()
         val ink = Ink.builder().apply {
             strokes.forEach { stroke ->
                 val builder = Ink.Stroke.builder()
@@ -86,14 +101,20 @@ class MlKitDigitalInkProvider : RecognitionProvider {
             (points.maxOf { it.x } - points.minOf { it.x }).coerceAtLeast(1f),
             (points.maxOf { it.y } - points.minOf { it.y }).coerceAtLeast(1f)
         )
-        val recognitionContext = RecognitionContext.builder().setWritingArea(writingArea).build()
+        val recognitionContext = RecognitionContext.builder()
+            .setPreContext("")
+            .setWritingArea(writingArea)
+            .build()
         val started = System.currentTimeMillis()
-        val response = suspendCancellableCoroutine { cont ->
-            recognizer.recognize(ink, recognitionContext)
-                .addOnSuccessListener { if (cont.isActive) cont.resume(it) }
-                .addOnFailureListener { if (cont.isActive) cont.resumeWithException(it) }
+        val response = try {
+            suspendCancellableCoroutine { cont ->
+                recognizer.recognize(ink, recognitionContext)
+                    .addOnSuccessListener { if (cont.isActive) cont.resume(it) }
+                    .addOnFailureListener { if (cont.isActive) cont.resumeWithException(it) }
+            }
+        } finally {
+            recognizer.close()
         }
-        recognizer.close()
         val candidates = response.candidates.map { it.text }
         return RecognitionResult(
             primary = candidates.firstOrNull().orEmpty(),

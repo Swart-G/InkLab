@@ -5,6 +5,9 @@ on:
     branches:
       - main
     paths:
+      - app/**
+      - README.md
+      - THIRD_PARTY_NOTICES.md
       - .github/workflows/publish-preview.yml
       - .github/release-notes.md
 
@@ -39,8 +42,10 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: inklab-preview
         run: |
-          gh release create "$RELEASE_TAG" InkLab-preview-arm64.apk \
-            --target "$GITHUB_SHA" \
+          git tag --force "$RELEASE_TAG" "$GITHUB_SHA"
+          git push --force origin "refs/tags/$RELEASE_TAG"
+          gh release upload "$RELEASE_TAG" InkLab-preview-arm64.apk --clobber
+          gh release edit "$RELEASE_TAG" \
             --title "InkLab Preview" \
             --notes-file .github/release-notes.md \
             --prerelease

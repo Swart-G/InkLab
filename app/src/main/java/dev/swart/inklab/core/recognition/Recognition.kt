@@ -31,6 +31,7 @@ interface RecognitionProvider {
     val capabilities: RecognitionCapabilities
     val downloadSizeBytes: Long? get() = null
     val licenseLabel: String? get() = null
+    val isPackageBundled: Boolean get() = false
     fun state(context: Context): ProviderState
     suspend fun prepare(context: Context, onProgress: (Float) -> Unit = {}): Result<Unit> = Result.success(Unit)
     suspend fun remove(context: Context): Result<Unit> = Result.success(Unit)

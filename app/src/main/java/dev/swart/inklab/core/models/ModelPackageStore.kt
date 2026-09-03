@@ -12,7 +12,8 @@ data class ModelArtifact(
     val path: String,
     val url: String,
     val sizeBytes: Long,
-    val sha256: String
+    val sha256: String,
+    val assetPath: String? = null
 )
 
 data class ModelPackage(
@@ -39,25 +40,29 @@ object ModelCatalog {
                 path = "encoder.onnx",
                 url = "$ROOT/onnx/encoder_model.onnx",
                 sizeBytes = 23_083_189,
-                sha256 = "5e5141ed5f6e05851b1a38b6df85fe17c1dcb779358729fa707f9ee36b7b9dd9"
+                sha256 = "5e5141ed5f6e05851b1a38b6df85fe17c1dcb779358729fa707f9ee36b7b9dd9",
+                assetPath = "ocr/pix2text-mfr/encoder.onnx"
             ),
             ModelArtifact(
                 path = "decoder-int8.onnx",
                 url = "$ROOT/onnx/decoder_model_int8.onnx",
                 sizeBytes = 7_989_844,
-                sha256 = "1b81c99876de606631449eacf1af32ce372f5641ebed3216e0208bde2bdbeaa6"
+                sha256 = "1b81c99876de606631449eacf1af32ce372f5641ebed3216e0208bde2bdbeaa6",
+                assetPath = "ocr/pix2text-mfr/decoder-int8.onnx"
             ),
             ModelArtifact(
                 path = "tokenizer.json",
                 url = "$ROOT/tokenizer.json",
                 sizeBytes = 39_161,
-                sha256 = "3e2ab757277d22639bec28c9d7972e352d3d1dba223051fa674002dc5ab64df3"
+                sha256 = "3e2ab757277d22639bec28c9d7972e352d3d1dba223051fa674002dc5ab64df3",
+                assetPath = "ocr/pix2text-mfr/tokenizer.json"
             )
         )
     )
 }
 
 class ModelPackageStore(context: Context) {
+    private val appContext = context.applicationContext
     private val root = File(context.noBackupFilesDir, "ocr-models")
 
     fun directory(modelPackage: ModelPackage) = File(root, modelPackage.id)
@@ -65,12 +70,17 @@ class ModelPackageStore(context: Context) {
     fun isInstalled(modelPackage: ModelPackage): Boolean = modelPackage.artifacts.all { artifact ->
         val target = File(directory(modelPackage), artifact.path)
         target.isFile && target.length() == artifact.sizeBytes
+    } && verificationMarker(modelPackage).run { isFile && readText() == modelPackage.verificationKey() }
+
+    fun isBundled(modelPackage: ModelPackage): Boolean = modelPackage.artifacts.all { artifact ->
+        artifact.assetPath?.let(::assetExists) == true
     }
 
     suspend fun install(modelPackage: ModelPackage, onProgress: (Float) -> Unit = {}): Result<Unit> =
         withContext(Dispatchers.IO) {
             runCatching {
                 val directory = directory(modelPackage).apply { mkdirs() }
+                verificationMarker(modelPackage).delete()
                 var completed = 0L
                 modelPackage.artifacts.forEach { artifact ->
                     val target = File(directory, artifact.path)
@@ -81,29 +91,28 @@ class ModelPackageStore(context: Context) {
                     }
                     val partial = File(directory, "${artifact.path}.part")
                     partial.delete()
-                    val connection = (URL(artifact.url).openConnection() as HttpURLConnection).apply {
-                        connectTimeout = 20_000
-                        readTimeout = 30_000
-                        instanceFollowRedirects = true
+                    val bundledInput = artifact.assetPath?.let { path ->
+                        runCatching { appContext.assets.open(path) }.getOrNull()
                     }
-                    try {
-                        connection.connect()
-                        check(connection.responseCode in 200..299) { "HTTP ${connection.responseCode} для ${artifact.path}" }
-                        connection.inputStream.buffered().use { input ->
-                            partial.outputStream().buffered().use { output ->
-                                val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
-                                var artifactRead = 0L
-                                while (true) {
-                                    val read = input.read(buffer)
-                                    if (read < 0) break
-                                    output.write(buffer, 0, read)
-                                    artifactRead += read
-                                    onProgress(((completed + artifactRead).toFloat() / modelPackage.sizeBytes).coerceIn(0f, 1f))
-                                }
-                            }
+                    if (bundledInput != null) {
+                        bundledInput.use { input ->
+                            copyToPartial(input.buffered(), partial, completed, modelPackage.sizeBytes, onProgress)
                         }
-                    } finally {
-                        connection.disconnect()
+                    } else {
+                        val connection = (URL(artifact.url).openConnection() as HttpURLConnection).apply {
+                            connectTimeout = 20_000
+                            readTimeout = 30_000
+                            instanceFollowRedirects = true
+                        }
+                        try {
+                            connection.connect()
+                            check(connection.responseCode in 200..299) { "HTTP ${connection.responseCode} для ${artifact.path}" }
+                            connection.inputStream.buffered().use { input ->
+                                copyToPartial(input, partial, completed, modelPackage.sizeBytes, onProgress)
+                            }
+                        } finally {
+                            connection.disconnect()
+                        }
                     }
                     check(partial.length() == artifact.sizeBytes) { "Неверный размер ${artifact.path}" }
                     check(partial.sha256() == artifact.sha256) { "SHA-256 не совпадает для ${artifact.path}" }
@@ -113,11 +122,43 @@ class ModelPackageStore(context: Context) {
                     })
                     completed += artifact.sizeBytes
                 }
+                verificationMarker(modelPackage).writeText(modelPackage.verificationKey())
                 onProgress(1f)
             }.onFailure {
                 directory(modelPackage).walkTopDown().filter { file -> file.name.endsWith(".part") }.forEach(File::delete)
             }
         }
+
+    private fun assetExists(path: String): Boolean = runCatching {
+        appContext.assets.open(path).use { }
+        true
+    }.getOrDefault(false)
+
+    private fun verificationMarker(modelPackage: ModelPackage) = File(directory(modelPackage), ".verified")
+
+    private fun ModelPackage.verificationKey(): String = artifacts.joinToString("\n") {
+        "${it.path}:${it.sizeBytes}:${it.sha256}"
+    }
+
+    private fun copyToPartial(
+        input: java.io.InputStream,
+        partial: File,
+        completed: Long,
+        packageSize: Long,
+        onProgress: (Float) -> Unit
+    ) {
+        partial.outputStream().buffered().use { output ->
+            val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+            var artifactRead = 0L
+            while (true) {
+                val read = input.read(buffer)
+                if (read < 0) break
+                output.write(buffer, 0, read)
+                artifactRead += read
+                onProgress(((completed + artifactRead).toFloat() / packageSize).coerceIn(0f, 1f))
+            }
+        }
+    }
 
     suspend fun remove(modelPackage: ModelPackage): Result<Unit> = withContext(Dispatchers.IO) {
         runCatching {

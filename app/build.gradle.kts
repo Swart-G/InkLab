@@ -27,6 +27,59 @@ android {
     }
 }
 
+val prepareBundledModels by tasks.registering {
+    val expected = mapOf(
+        "encoder.onnx" to Triple(
+            "https://raw.githubusercontent.com/samirahmed007/mathorium/f2411279317da9cf3a12ceb453c9a96aca5b4743/public/models/pix2text-mfr-quantized/onnx/encoder_model.onnx",
+            23_083_189L,
+            "5e5141ed5f6e05851b1a38b6df85fe17c1dcb779358729fa707f9ee36b7b9dd9"
+        ),
+        "decoder-int8.onnx" to Triple(
+            "https://raw.githubusercontent.com/samirahmed007/mathorium/f2411279317da9cf3a12ceb453c9a96aca5b4743/public/models/pix2text-mfr-quantized/onnx/decoder_model_int8.onnx",
+            7_989_844L,
+            "1b81c99876de606631449eacf1af32ce372f5641ebed3216e0208bde2bdbeaa6"
+        ),
+        "tokenizer.json" to Triple(
+            "https://raw.githubusercontent.com/samirahmed007/mathorium/f2411279317da9cf3a12ceb453c9a96aca5b4743/public/models/pix2text-mfr-quantized/tokenizer.json",
+            39_161L,
+            "3e2ab757277d22639bec28c9d7972e352d3d1dba223051fa674002dc5ab64df3"
+        )
+    )
+    val modelDir = layout.projectDirectory.dir("src/main/assets/ocr/pix2text-mfr")
+    outputs.files(expected.keys.map { modelDir.file(it) })
+    outputs.upToDateWhen { false }
+
+    doLast {
+        expected.forEach { (name, metadata) ->
+            val file = modelDir.file(name).asFile
+            file.parentFile.mkdirs()
+            if (!file.isFile || file.length() != metadata.second) {
+                val partial = file.resolveSibling("${file.name}.part")
+                partial.delete()
+                java.net.URI(metadata.first).toURL().openStream().buffered().use { input ->
+                    partial.outputStream().buffered().use { output -> input.copyTo(output) }
+                }
+                file.delete()
+                check(partial.renameTo(file)) { "Could not install bundled model: $name" }
+            }
+            check(file.length() == metadata.second) { "Unexpected size for bundled model: $name" }
+            val digest = java.security.MessageDigest.getInstance("SHA-256")
+            file.inputStream().buffered().use { input ->
+                val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
+                while (true) {
+                    val read = input.read(buffer)
+                    if (read < 0) break
+                    digest.update(buffer, 0, read)
+                }
+            }
+            val actualHash = digest.digest().joinToString("") { "%02x".format(it) }
+            check(actualHash == metadata.third) { "SHA-256 mismatch for bundled model: $name" }
+        }
+    }
+}
+
+tasks.named("preBuild").configure { dependsOn(prepareBundledModels) }
+
 dependencies {
     implementation(platform("androidx.compose:compose-bom:2026.06.01"))
     implementation("androidx.activity:activity-compose:1.13.0")

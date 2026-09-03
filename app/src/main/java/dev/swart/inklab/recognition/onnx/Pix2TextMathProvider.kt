@@ -29,7 +29,7 @@ import kotlin.math.max
 class Pix2TextMathProvider : RecognitionProvider {
     override val id = "pix2text-math"
     override val displayName = "Pix2Text MFR"
-    override val subtitle = "Формулы · ONNX int8 · полностью локально"
+    override val subtitle = "Формулы · SDK и веса встроены · полностью локально"
     override val capabilities = RecognitionCapabilities(
         text = false,
         math = true,
@@ -39,12 +39,18 @@ class Pix2TextMathProvider : RecognitionProvider {
     )
     override val downloadSizeBytes = ModelCatalog.pix2Text.sizeBytes
     override val licenseLabel = ModelCatalog.pix2Text.license
+    override val isPackageBundled = true
 
     @Volatile private var engine: Engine? = null
 
-    override fun state(context: Context): ProviderState =
-        if (ModelPackageStore(context).isInstalled(ModelCatalog.pix2Text)) ProviderState.READY
-        else ProviderState.MODEL_REQUIRED
+    override fun state(context: Context): ProviderState {
+        val store = ModelPackageStore(context)
+        return if (store.isInstalled(ModelCatalog.pix2Text) || store.isBundled(ModelCatalog.pix2Text)) {
+            ProviderState.READY
+        } else {
+            ProviderState.MODEL_REQUIRED
+        }
+    }
 
     override suspend fun prepare(context: Context, onProgress: (Float) -> Unit): Result<Unit> =
         ModelPackageStore(context).install(ModelCatalog.pix2Text, onProgress)
@@ -62,11 +68,10 @@ class Pix2TextMathProvider : RecognitionProvider {
     ): RecognitionResult = withContext(Dispatchers.Default) {
         require(mode == RecognitionMode.MATH)
         check(strokes.isNotEmpty()) { "Нет штрихов для распознавания" }
-        if (state(context) != ProviderState.READY) {
-            prepare(context).getOrThrow()
-        }
+        val store = ModelPackageStore(context)
+        if (!store.isInstalled(ModelCatalog.pix2Text)) prepare(context).getOrThrow()
         val activeEngine = engine ?: synchronized(this@Pix2TextMathProvider) {
-            engine ?: Engine(ModelPackageStore(context).directory(ModelCatalog.pix2Text)).also { engine = it }
+            engine ?: Engine(store.directory(ModelCatalog.pix2Text)).also { engine = it }
         }
         val bitmap = rasterize(strokes)
         val started = System.currentTimeMillis()

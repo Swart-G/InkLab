@@ -170,7 +170,7 @@ private fun RecognitionSettings(vm: EditorViewModel) {
                     Spacer(Modifier.weight(1f))
                     when {
                         progress != null -> CircularProgressIndicator(progress = { progress }, modifier = Modifier.size(24.dp))
-                        state == ProviderState.READY && provider.downloadSizeBytes != null -> IconButton(onClick = { vm.removeProvider(context, provider.id) }) {
+                        state == ProviderState.READY && provider.downloadSizeBytes != null && !provider.isPackageBundled -> IconButton(onClick = { vm.removeProvider(context, provider.id) }) {
                             Icon(Icons.Outlined.DeleteOutline, "Удалить пакет")
                         }
                         state == ProviderState.MODEL_REQUIRED -> IconButton(onClick = { vm.prepareProvider(context, provider.id) }) {
@@ -183,6 +183,9 @@ private fun RecognitionSettings(vm: EditorViewModel) {
                     Text("Загрузка ${(progress * 100).toInt()}%", style = MaterialTheme.typography.bodySmall, color = InkColors.Muted)
                 }
                 vm.modelErrors[provider.id]?.let { Text(it, color = MaterialTheme.colorScheme.error, style = MaterialTheme.typography.bodySmall) }
+                if (provider.isPackageBundled) {
+                    Text("Веса и ONNX Runtime уже находятся внутри APK.", color = InkColors.Muted, style = MaterialTheme.typography.bodySmall)
+                }
                 if (state == ProviderState.SDK_REQUIRED) {
                     Text("SDK требует отдельной лицензии и не включён в публичный репозиторий.", color = InkColors.Muted, style = MaterialTheme.typography.bodySmall)
                 }

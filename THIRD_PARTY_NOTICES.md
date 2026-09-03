@@ -21,8 +21,8 @@
 - Source: https://github.com/samirahmed007/mathorium
 - Pinned source commit: `f2411279317da9cf3a12ceb453c9a96aca5b4743`.
 
-The model files are downloaded only when requested in InkLab. The application verifies their expected byte size and SHA-256 before installation.
+The model files are bundled in the APK. On first use, the application copies them to private storage and verifies their expected byte size and SHA-256.
 
 ## MyScript iink
 
-MyScript binaries and recognition resources are not redistributed. The UI entries are integration placeholders only. A developer must obtain and accept the applicable MyScript license before adding a private SDK package.
+MyScript binaries and recognition resources are not redistributed or shown as available engines. A developer must obtain and accept the applicable MyScript license before adding a private SDK package.

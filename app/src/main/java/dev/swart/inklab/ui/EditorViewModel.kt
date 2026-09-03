@@ -368,7 +368,6 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         viewModelScope.launch {
             recognition = UiRecognition(mode, loading = true)
             runCatching {
-                if (provider.state(context) == ProviderState.MODEL_REQUIRED) provider.prepare(context).getOrThrow()
                 provider.recognize(context, input, mode)
             }.onSuccess { recognition = UiRecognition(mode, result = it) }
                 .onFailure { recognition = UiRecognition(mode, error = it.message ?: "Ошибка распознавания") }
