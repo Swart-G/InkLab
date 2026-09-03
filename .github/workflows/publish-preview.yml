@@ -1,0 +1,46 @@
+name: Publish InkLab Preview
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/publish-preview.yml
+      - .github/release-notes.md
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out sources
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Test, lint and build
+        run: ./gradlew clean testDebugUnitTest lintDebug assembleDebug
+
+      - name: Prepare APK
+        run: cp app/build/outputs/apk/debug/app-debug.apk InkLab-preview-arm64.apk
+
+      - name: Publish preview release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: inklab-preview
+        run: |
+          gh release create "$RELEASE_TAG" InkLab-preview-arm64.apk \
+            --target "$GITHUB_SHA" \
+            --title "InkLab Preview" \
+            --notes-file .github/release-notes.md \
+            --prerelease
