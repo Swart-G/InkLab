@@ -4,23 +4,35 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Shapes
 import androidx.compose.material3.Typography
-import androidx.compose.material3.lightColorScheme
 import androidx.compose.material3.darkColorScheme
+import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
 object InkColors {
-    var Paper = Color(0xFFF5F2EC)
-    var PaperRaised = Color(0xFFFBF9F5)
-    var Ink = Color(0xFF24262B)
-    var Muted = Color(0xFF77766F)
-    var Line = Color(0xFFE4DED4)
-    var Accent = Color(0xFF6157D9)
-    var AccentSoft = Color(0xFFE9E6FF)
-    var Mint = Color(0xFFDDF4EA)
-    var Rose = Color(0xFFFFE4E6)
+    var Paper by mutableStateOf(Color(0xFFF5F2EC))
+        private set
+    var PaperRaised by mutableStateOf(Color(0xFFFBF9F5))
+        private set
+    var Ink by mutableStateOf(Color(0xFF24262B))
+        private set
+    var Muted by mutableStateOf(Color(0xFF77766F))
+        private set
+    var Line by mutableStateOf(Color(0xFFE4DED4))
+        private set
+    var Accent by mutableStateOf(Color(0xFF6157D9))
+        private set
+    var AccentSoft by mutableStateOf(Color(0xFFE9E6FF))
+        private set
+    var Mint by mutableStateOf(Color(0xFFDDF4EA))
+        private set
+    var Rose by mutableStateOf(Color(0xFFFFE4E6))
+        private set
 
     fun useDark(enabled: Boolean) {
         Paper = if (enabled) Color(0xFF17181C) else Color(0xFFF5F2EC)
@@ -35,7 +47,7 @@ object InkColors {
     }
 }
 
-private val Scheme = lightColorScheme(
+private fun lightScheme() = lightColorScheme(
     primary = InkColors.Accent,
     onPrimary = Color.White,
     primaryContainer = InkColors.AccentSoft,
@@ -44,6 +56,8 @@ private val Scheme = lightColorScheme(
     onBackground = InkColors.Ink,
     surface = InkColors.PaperRaised,
     onSurface = InkColors.Ink,
+    surfaceVariant = InkColors.PaperRaised,
+    onSurfaceVariant = InkColors.Ink,
     outline = InkColors.Line
 )
 
@@ -56,6 +70,8 @@ private fun darkScheme() = darkColorScheme(
     onBackground = InkColors.Ink,
     surface = InkColors.PaperRaised,
     onSurface = InkColors.Ink,
+    surfaceVariant = InkColors.PaperRaised,
+    onSurfaceVariant = InkColors.Ink,
     outline = InkColors.Line
 )
 
@@ -63,7 +79,7 @@ private fun darkScheme() = darkColorScheme(
 fun InkLabTheme(darkTheme: Boolean = false, content: @Composable () -> Unit) {
     InkColors.useDark(darkTheme)
     MaterialTheme(
-        colorScheme = if (darkTheme) darkScheme() else Scheme,
+        colorScheme = if (darkTheme) darkScheme() else lightScheme(),
         typography = Typography(
             headlineLarge = Typography().headlineLarge.copy(letterSpacing = (-0.8).sp),
             titleLarge = Typography().titleLarge.copy(letterSpacing = (-0.25).sp)

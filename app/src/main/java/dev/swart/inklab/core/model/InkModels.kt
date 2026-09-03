@@ -59,6 +59,14 @@ data class InkPage(
     val convertedObjects: List<ConvertedInkObject> = emptyList()
 )
 
+data class InkFolder(
+    val id: String = UUID.randomUUID().toString(),
+    val title: String = "Новая папка",
+    val parentId: String? = null,
+    val createdAt: Long = System.currentTimeMillis(),
+    val updatedAt: Long = System.currentTimeMillis()
+)
+
 data class InkBoard(
     val id: String = UUID.randomUUID().toString(),
     val title: String = "Новая доска",
@@ -69,5 +77,6 @@ data class InkBoard(
     val orientation: PageOrientation = PageOrientation.PORTRAIT,
     val settings: BoardSettings = BoardSettings(),
     val pages: List<InkPage> = listOf(InkPage()),
-    val lastPageIndex: Int = 0
+    val lastPageIndex: Int = 0,
+    val folderId: String? = null
 )

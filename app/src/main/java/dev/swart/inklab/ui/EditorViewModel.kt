@@ -27,6 +27,7 @@ import dev.swart.inklab.core.model.ConvertedInkKind
 import dev.swart.inklab.core.model.ConvertedInkObject
 import dev.swart.inklab.core.model.DocumentFormat
 import dev.swart.inklab.core.model.InkBoard
+import dev.swart.inklab.core.model.InkFolder
 import dev.swart.inklab.core.model.InkPage
 import dev.swart.inklab.core.model.InkPoint
 import dev.swart.inklab.core.model.InkStroke
@@ -68,6 +69,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     private val initialInputPreferences = inputRepository.load()
 
     val boards = mutableStateListOf<InkBoard>()
+    val folders = mutableStateListOf<InkFolder>()
     val strokes = mutableStateListOf<InkStroke>()
     val convertedObjects = mutableStateListOf<ConvertedInkObject>()
     val modelProgress = mutableStateMapOf<String, Float>()
@@ -125,6 +127,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         get() = selectedConvertedObject?.bounds() ?: currentSelectionBounds
 
     init {
+        folders += boardRepository.loadFolders()
         val loaded = boardRepository.load()
         boards += if (loaded.isEmpty()) listOf(InkBoard(title = "Новая доска")) else loaded
         openBoard(boards.first().id, persistPrevious = false)
@@ -139,14 +142,16 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         title: String,
         format: DocumentFormat,
         orientation: PageOrientation,
-        settings: BoardSettings = BoardSettings()
+        settings: BoardSettings = BoardSettings(),
+        folderId: String? = null
     ): InkBoard {
         persistCurrentBoard()
         val board = InkBoard(
             title = title.ifBlank { if (format == DocumentFormat.NOTEBOOK) "Новая тетрадь" else "Новая доска" },
             format = format,
             orientation = orientation,
-            settings = settings
+            settings = settings,
+            folderId = folderId
         )
         boards.add(0, board)
         scheduleSave()
@@ -156,6 +161,33 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun createBoard(): InkBoard = createDocument("Новая доска", DocumentFormat.BOARD, PageOrientation.LANDSCAPE)
+
+    fun createFolder(title: String, parentId: String? = null): InkFolder {
+        val folder = InkFolder(title = title.ifBlank { "Новая папка" }, parentId = parentId)
+        folders.add(0, folder)
+        scheduleSave()
+        return folder
+    }
+
+    fun renameFolder(id: String, title: String) {
+        val index = folders.indexOfFirst { it.id == id }
+        if (index < 0 || title.isBlank()) return
+        folders[index] = folders[index].copy(title = title.trim(), updatedAt = System.currentTimeMillis())
+        scheduleSave()
+    }
+
+    fun deleteFolder(id: String) {
+        val folder = folders.firstOrNull { it.id == id } ?: return
+        val parent = folder.parentId
+        for (index in boards.indices) {
+            if (boards[index].folderId == id) boards[index] = boards[index].copy(folderId = parent, updatedAt = System.currentTimeMillis())
+        }
+        for (index in folders.indices) {
+            if (folders[index].parentId == id) folders[index] = folders[index].copy(parentId = parent, updatedAt = System.currentTimeMillis())
+        }
+        folders.removeAll { it.id == id }
+        scheduleSave()
+    }
 
     fun openBoard(id: String, persistPrevious: Boolean = true) {
         if (id == currentBoardId) {
@@ -192,6 +224,13 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 screen = AppScreen.BOARDS
             }
         }
+        scheduleSave()
+    }
+
+    fun renameBoard(id: String, title: String) {
+        val index = boards.indexOfFirst { it.id == id }
+        if (index < 0 || title.isBlank()) return
+        boards[index] = boards[index].copy(title = title.trim(), updatedAt = System.currentTimeMillis())
         scheduleSave()
     }
 
@@ -254,6 +293,21 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         updateInputPreferences(inputPreferences.copy(penColor = color.toArgb()))
     }
 
+    fun chooseQuickPenColor(index: Int) {
+        val value = inputPreferences.quickPenColors.getOrNull(index) ?: return
+        choosePenColor(Color(value))
+        tool = EditorTool.PEN
+    }
+
+    fun updateQuickPenColor(index: Int, color: Color) {
+        if (index !in inputPreferences.quickPenColors.indices) return
+        val colors = inputPreferences.quickPenColors.toMutableList()
+        colors[index] = color.toArgb()
+        updateInputPreferences(inputPreferences.copy(quickPenColors = colors, penColor = color.toArgb()))
+        penColor = color
+        tool = EditorTool.PEN
+    }
+
     fun effectiveTool(source: CanvasInputSource, sideButton: Boolean): EditorTool? = when (source) {
         CanvasInputSource.STYLUS_ERASER -> EditorTool.ERASER
         CanvasInputSource.STYLUS -> if (sideButton) {
@@ -269,11 +323,16 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
 
     fun setStylusContact(active: Boolean) { stylusInContact = active }
 
-    fun screenToCanvas(point: Offset): Offset = (point - viewportOffset) / viewportScale
+    fun screenToCanvas(point: Offset): Offset =
+        if (currentBoard?.format == DocumentFormat.NOTEBOOK) point else (point - viewportOffset) / viewportScale
 
-    fun panBy(delta: Offset) { viewportOffset += delta }
+    fun panBy(delta: Offset) {
+        if (currentBoard?.format == DocumentFormat.NOTEBOOK) return
+        viewportOffset += delta
+    }
 
     fun zoomBy(factor: Float, centroid: Offset) {
+        if (currentBoard?.format == DocumentFormat.NOTEBOOK) return
         val nextScale = (viewportScale * factor).coerceIn(0.45f, 4f)
         val anchor = screenToCanvas(centroid)
         viewportScale = nextScale
@@ -312,11 +371,11 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
-    fun finishStroke() {
+    fun finishStroke(snapToShape: Boolean = false) {
         if (currentPoints.size > 1) {
             pushUndo()
             val stroke = InkStroke(points = currentPoints.toList(), width = penWidth, color = penColor)
-            strokes += if (inputPreferences.autoShapes) autoRecognizeShape(stroke) else stroke
+            strokes += if (inputPreferences.autoShapes && snapToShape) autoRecognizeShape(stroke) else stroke
             selectedIds = emptySet()
             persistCurrentBoard()
         }
@@ -475,7 +534,6 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             return
         }
 
-        // Treat nearby strokes as one handwritten object (usually a word or formula).
         val selected = linkedSetOf(hit.id)
         var area = strokeBounds(hit)?.inflate(16f / viewportScale) ?: return
         var changed: Boolean
@@ -611,8 +669,9 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             }.onSuccess {
                 recognition = UiRecognition(mode, result = it, sourceIds = sourceIds)
                 applyRecognition()
+            }.onFailure {
+                recognition = UiRecognition(mode, error = it.message ?: "Ошибка распознавания", sourceIds = sourceIds)
             }
-                .onFailure { recognition = UiRecognition(mode, error = it.message ?: "Ошибка распознавания", sourceIds = sourceIds) }
         }
     }
 
@@ -735,10 +794,12 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
 
     private fun scheduleSave() {
         saveJob?.cancel()
-        val snapshot = boards.toList()
+        val boardSnapshot = boards.toList()
+        val folderSnapshot = folders.toList()
         saveJob = viewModelScope.launch(Dispatchers.IO) {
             delay(220)
-            boardRepository.save(snapshot)
+            boardRepository.save(boardSnapshot)
+            boardRepository.saveFolders(folderSnapshot)
         }
     }
 

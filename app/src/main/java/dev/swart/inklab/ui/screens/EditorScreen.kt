@@ -4,9 +4,9 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.scaleIn
 import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -65,25 +65,25 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
+import dev.swart.inklab.R
 import dev.swart.inklab.core.model.ConvertedInkKind
 import dev.swart.inklab.core.model.DocumentFormat
 import dev.swart.inklab.core.model.PageOrientation
@@ -123,7 +123,7 @@ fun EditorScreen(vm: EditorViewModel) {
 
                     Surface(
                         pageModifier.align(Alignment.Center),
-                        shape = RoundedCornerShape(if (board?.format == DocumentFormat.NOTEBOOK) 16.dp else 30.dp),
+                        shape = RoundedCornerShape(if (board?.format == DocumentFormat.NOTEBOOK) 14.dp else 30.dp),
                         color = InkColors.PaperRaised,
                         shadowElevation = 3.dp
                     ) {
@@ -133,13 +133,18 @@ fun EditorScreen(vm: EditorViewModel) {
                         }
                     }
 
-                    ToolDock(vm, Modifier.align(Alignment.CenterStart).padding(start = 14.dp).zIndex(3f))
-                    AssistChip(
-                        onClick = vm::resetViewport,
-                        label = { Text("${(vm.viewportScale * 100).toInt()}%") },
-                        leadingIcon = { Icon(Icons.Outlined.FitScreen, null, Modifier.size(16.dp)) },
-                        modifier = Modifier.align(Alignment.BottomEnd).padding(18.dp)
+                    ToolDock(
+                        vm,
+                        Modifier.align(Alignment.TopCenter).padding(top = 10.dp).zIndex(5f)
                     )
+                    if (board?.format != DocumentFormat.NOTEBOOK) {
+                        AssistChip(
+                            onClick = vm::resetViewport,
+                            label = { Text("${(vm.viewportScale * 100).toInt()}%") },
+                            leadingIcon = { Icon(Icons.Outlined.FitScreen, null, Modifier.size(16.dp)) },
+                            modifier = Modifier.align(Alignment.BottomEnd).padding(18.dp)
+                        )
+                    }
                     if (board?.format == DocumentFormat.NOTEBOOK) {
                         PageControls(vm, Modifier.align(Alignment.BottomCenter).padding(bottom = 14.dp).zIndex(4f))
                     }
@@ -188,11 +193,13 @@ private fun EditorDrawer(vm: EditorViewModel, close: () -> Unit) {
 @Composable
 private fun TopBar(vm: EditorViewModel, onMenu: () -> Unit) {
     var paperMenu by remember { mutableStateOf(false) }
+    var renameDialog by remember(vm.currentBoardId) { mutableStateOf(false) }
+    val board = vm.currentBoard
     Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
         IconButton(onClick = onMenu) { Icon(Icons.Outlined.Menu, "Меню") }
         Text(
-            vm.currentBoard?.title ?: "InkLab",
-            modifier = Modifier.weight(1f).padding(start = 8.dp),
+            board?.title ?: "InkLab",
+            modifier = Modifier.weight(1f).padding(start = 8.dp).clickable(enabled = board != null) { renameDialog = true },
             style = MaterialTheme.typography.titleLarge,
             fontWeight = FontWeight.SemiBold,
             maxLines = 1
@@ -206,6 +213,24 @@ private fun TopBar(vm: EditorViewModel, onMenu: () -> Unit) {
             PaperMenu(vm, paperMenu) { paperMenu = false }
         }
     }
+    if (renameDialog && board != null) {
+        RenameDocumentDialog(board.title, { renameDialog = false }) { title ->
+            vm.renameBoard(board.id, title)
+            renameDialog = false
+        }
+    }
+}
+
+@Composable
+private fun RenameDocumentDialog(initial: String, dismiss: () -> Unit, save: (String) -> Unit) {
+    var value by remember(initial) { mutableStateOf(initial) }
+    AlertDialog(
+        onDismissRequest = dismiss,
+        title = { Text("Переименовать файл") },
+        text = { OutlinedTextField(value, { value = it }, singleLine = true, modifier = Modifier.fillMaxWidth(), label = { Text("Название") }) },
+        confirmButton = { TextButton(enabled = value.isNotBlank(), onClick = { save(value.trim()) }) { Text("Сохранить") } },
+        dismissButton = { TextButton(onClick = dismiss) { Text("Отмена") } }
+    )
 }
 
 @Composable
@@ -231,9 +256,6 @@ private fun PaperMenu(vm: EditorViewModel, expanded: Boolean, dismiss: () -> Uni
             }
             Text("Шаг · ${settings.spacing.toInt()}", color = InkColors.Muted, style = MaterialTheme.typography.bodySmall)
             Slider(settings.spacing, { vm.updatePaperSettings(settings.copy(spacing = it)) }, valueRange = 20f..56f, steps = 8)
-            TextButton(onClick = { dismiss(); vm.navigate(AppScreen.BOARD_SETTINGS) }, modifier = Modifier.align(Alignment.End)) {
-                Text("Параметры файла")
-            }
         }
     }
 }
@@ -241,9 +263,10 @@ private fun PaperMenu(vm: EditorViewModel, expanded: Boolean, dismiss: () -> Uni
 @Composable
 private fun ToolDock(vm: EditorViewModel, modifier: Modifier = Modifier) {
     var optionsFor by remember { mutableStateOf<EditorTool?>(null) }
+    var editingColorSlot by remember { mutableStateOf<Int?>(null) }
     Box(modifier) {
         GlassPanel {
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
                 ToolButton(Icons.Outlined.Draw, "Перо", vm.tool == EditorTool.PEN) {
                     if (vm.tool == EditorTool.PEN) optionsFor = EditorTool.PEN else vm.tool = EditorTool.PEN
                 }
@@ -253,13 +276,17 @@ private fun ToolDock(vm: EditorViewModel, modifier: Modifier = Modifier) {
                 ToolButton(Icons.Outlined.Gesture, "Лассо", vm.tool == EditorTool.LASSO) {
                     if (vm.tool == EditorTool.LASSO) optionsFor = EditorTool.LASSO else vm.tool = EditorTool.LASSO
                 }
-                HorizontalDivider(Modifier.width(34.dp).padding(vertical = 6.dp), color = InkColors.Line)
+                Box(Modifier.padding(horizontal = 6.dp).size(width = 1.dp, height = 30.dp).background(InkColors.Line))
+                vm.inputPreferences.quickPenColors.forEachIndexed { index, color ->
+                    QuickColorDot(
+                        color = Color(color),
+                        selected = vm.tool == EditorTool.PEN && vm.penColor == Color(color),
+                        onTap = { vm.chooseQuickPenColor(index) },
+                        onLongPress = { editingColorSlot = index }
+                    )
+                }
                 IconButton(onClick = { optionsFor = vm.tool }) {
-                    when (vm.tool) {
-                        EditorTool.PEN -> Box(Modifier.size(vm.penWidth.dp.coerceIn(5.dp, 13.dp)).background(vm.penColor, CircleShape))
-                        EditorTool.ERASER -> EraserGlyph(InkColors.Ink, Modifier.size(22.dp))
-                        EditorTool.LASSO -> Icon(Icons.Outlined.Gesture, null, Modifier.size(20.dp))
-                    }
+                    Icon(Icons.Outlined.Tune, "Параметры инструмента", Modifier.size(21.dp))
                 }
             }
         }
@@ -272,6 +299,65 @@ private fun ToolDock(vm: EditorViewModel, modifier: Modifier = Modifier) {
             }
         }
     }
+    editingColorSlot?.let { slot ->
+        val initial = Color(vm.inputPreferences.quickPenColors[slot])
+        QuickColorDialog(initial, { editingColorSlot = null }) { color ->
+            vm.updateQuickPenColor(slot, color)
+            editingColorSlot = null
+        }
+    }
+}
+
+@Composable
+private fun QuickColorDot(color: Color, selected: Boolean, onTap: () -> Unit, onLongPress: () -> Unit) {
+    Surface(
+        modifier = Modifier
+            .padding(horizontal = 3.dp)
+            .size(27.dp)
+            .pointerInput(color) {
+                detectTapGestures(onTap = { onTap() }, onLongPress = { onLongPress() })
+            },
+        shape = CircleShape,
+        color = color,
+        border = if (selected) BorderStroke(3.dp, InkColors.Accent) else BorderStroke(1.dp, InkColors.Line)
+    ) {}
+}
+
+@Composable
+private fun QuickColorDialog(initial: Color, dismiss: () -> Unit, save: (Color) -> Unit) {
+    var red by remember(initial) { mutableFloatStateOf(initial.red * 255f) }
+    var green by remember(initial) { mutableFloatStateOf(initial.green * 255f) }
+    var blue by remember(initial) { mutableFloatStateOf(initial.blue * 255f) }
+    val current = Color(red / 255f, green / 255f, blue / 255f, 1f)
+    AlertDialog(
+        onDismissRequest = dismiss,
+        title = { Text("Быстрый цвет") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Surface(Modifier.size(42.dp), CircleShape, current, border = BorderStroke(1.dp, InkColors.Line)) {}
+                    Text("Удерживайте цвет на панели, чтобы изменить его снова.", color = InkColors.Muted, style = MaterialTheme.typography.bodySmall)
+                }
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    penPalette.forEach { preset ->
+                        ColorDot(preset, current, 25.dp) {
+                            red = preset.red * 255f
+                            green = preset.green * 255f
+                            blue = preset.blue * 255f
+                        }
+                    }
+                }
+                Text("R · ${red.toInt()}", style = MaterialTheme.typography.bodySmall, color = InkColors.Muted)
+                Slider(red, { red = it }, valueRange = 0f..255f)
+                Text("G · ${green.toInt()}", style = MaterialTheme.typography.bodySmall, color = InkColors.Muted)
+                Slider(green, { green = it }, valueRange = 0f..255f)
+                Text("B · ${blue.toInt()}", style = MaterialTheme.typography.bodySmall, color = InkColors.Muted)
+                Slider(blue, { blue = it }, valueRange = 0f..255f)
+            }
+        },
+        confirmButton = { TextButton(onClick = { save(current) }) { Text("Сохранить") } },
+        dismissButton = { TextButton(onClick = dismiss) { Text("Отмена") } }
+    )
 }
 
 @Composable
@@ -430,7 +516,7 @@ private fun EditConvertedDialog(vm: EditorViewModel, kind: ConvertedInkKind, ini
 }
 
 @Composable
-private fun ToolButton(icon: ImageVector, label: String, selected: Boolean, onClick: () -> Unit) {
+private fun ToolButton(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, selected: Boolean, onClick: () -> Unit) {
     IconButton(
         onClick = onClick,
         colors = IconButtonDefaults.iconButtonColors(
@@ -448,17 +534,12 @@ private fun EraserToolButton(selected: Boolean, onClick: () -> Unit) {
             containerColor = if (selected) InkColors.Accent else Color.Transparent,
             contentColor = if (selected) Color.White else InkColors.Ink
         )
-    ) { EraserGlyph(if (selected) Color.White else InkColors.Ink, Modifier.size(24.dp)) }
-}
-
-@Composable
-private fun EraserGlyph(color: Color, modifier: Modifier = Modifier) {
-    Canvas(modifier) {
-        val w = size.width
-        val h = size.height
-        drawLine(color, Offset(w * .23f, h * .73f), Offset(w * .70f, h * .26f), w * .28f, StrokeCap.Square)
-        drawLine(color.copy(alpha = .42f), Offset(w * .59f, h * .37f), Offset(w * .76f, h * .54f), w * .28f, StrokeCap.Square)
-        drawLine(color, Offset(w * .12f, h * .87f), Offset(w * .55f, h * .87f), w * .07f, StrokeCap.Round)
+    ) {
+        Icon(
+            painter = painterResource(R.drawable.ic_ink_eraser),
+            contentDescription = "Ластик",
+            modifier = Modifier.size(24.dp)
+        )
     }
 }
 
