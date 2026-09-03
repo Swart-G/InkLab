@@ -2,7 +2,6 @@ package dev.swart.inklab.ui.screens
 
 import android.graphics.Paint
 import android.graphics.Typeface
-import android.view.MotionEvent
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -24,13 +23,12 @@ import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.input.pointer.PointerEventPass
-import androidx.compose.ui.input.pointer.PointerEvent
 import androidx.compose.ui.input.pointer.PointerType
 import androidx.compose.ui.input.pointer.isSecondaryPressed
 import androidx.compose.ui.input.pointer.isTertiaryPressed
+import androidx.compose.ui.input.pointer.isPrimaryPressed
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChanged
-import androidx.compose.ui.input.pointer.nativeEvent
 import dev.swart.inklab.core.model.ConvertedInkKind
 import dev.swart.inklab.core.model.InkPoint
 import dev.swart.inklab.core.model.PaperPattern
@@ -334,12 +332,8 @@ fun EditorCanvas(vm: EditorViewModel, modifier: Modifier = Modifier) {
     }
 }
 
-private fun PointerEvent.hasStylusButton(): Boolean {
-    val nativeButtons = nativeEvent.buttonState
-    return buttons.isSecondaryPressed || buttons.isTertiaryPressed ||
-        nativeButtons and MotionEvent.BUTTON_STYLUS_PRIMARY != 0 ||
-        nativeButtons and MotionEvent.BUTTON_STYLUS_SECONDARY != 0
-}
+private fun androidx.compose.ui.input.pointer.PointerEvent.hasStylusButton(): Boolean =
+    buttons.isPrimaryPressed || buttons.isSecondaryPressed || buttons.isTertiaryPressed
 
 private fun androidx.compose.ui.input.pointer.PointerInputChange.toInkPoint(
     canvasPoint: Offset,
