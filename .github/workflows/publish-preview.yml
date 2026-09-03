@@ -1,5 +1,7 @@
 name: Publish InkLab Preview
 
+# Pull requests run verification only; publishing remains exclusive to main.
+
 on:
   push:
     branches:
