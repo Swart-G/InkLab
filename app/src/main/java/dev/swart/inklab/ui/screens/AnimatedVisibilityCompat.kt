@@ -5,15 +5,16 @@ import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 
 /**
- * Keeps AnimatedVisibility calls inside the editor independent from the
- * ColumnScope/RowScope overloads that can leak through nested layout scopes.
+ * Resolves AnimatedVisibility inside the editor canvas against the closest
+ * BoxScope instead of the outer ColumnScope overload.
  */
 @Composable
-fun AnimatedVisibility(
+fun BoxScope.AnimatedVisibility(
     visible: Boolean,
     modifier: Modifier = Modifier,
     enter: EnterTransition = fadeIn(),
