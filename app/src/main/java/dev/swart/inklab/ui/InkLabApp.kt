@@ -1,6 +1,5 @@
 package dev.swart.inklab.ui
 
-import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
@@ -23,10 +22,6 @@ import dev.swart.inklab.ui.theme.InkColors
 
 @Composable
 fun InkLabApp(vm: EditorViewModel = viewModel()) {
-    BackHandler(enabled = vm.screen != AppScreen.EDITOR) {
-        vm.navigate(AppScreen.EDITOR)
-    }
-
     Box(Modifier.fillMaxSize().background(InkColors.Paper).windowInsetsPadding(WindowInsets.safeDrawing)) {
         AnimatedContent(
             targetState = vm.screen,
