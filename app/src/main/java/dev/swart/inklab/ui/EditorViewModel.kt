@@ -19,6 +19,8 @@ import dev.swart.inklab.core.ink.selectionBounds
 import dev.swart.inklab.core.ink.splitStrokeByCircle
 import dev.swart.inklab.core.ink.strokeIntersectsCircle
 import dev.swart.inklab.core.model.BoardSettings
+import dev.swart.inklab.core.model.ConvertedInkKind
+import dev.swart.inklab.core.model.ConvertedInkObject
 import dev.swart.inklab.core.model.InkBoard
 import dev.swart.inklab.core.model.InkPoint
 import dev.swart.inklab.core.model.InkStroke
@@ -36,6 +38,7 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.util.UUID
+import kotlin.math.max
 
 enum class EditorTool { PEN, ERASER, LASSO }
 enum class CanvasInputSource { STYLUS, STYLUS_ERASER, TOUCH, MOUSE }
@@ -45,7 +48,13 @@ data class UiRecognition(
     val mode: RecognitionMode,
     val loading: Boolean = false,
     val result: RecognitionResult? = null,
-    val error: String? = null
+    val error: String? = null,
+    val sourceIds: Set<String> = emptySet()
+)
+
+private data class DocumentSnapshot(
+    val strokes: List<InkStroke>,
+    val convertedObjects: List<ConvertedInkObject>
 )
 
 class EditorViewModel(application: Application) : AndroidViewModel(application) {
@@ -54,6 +63,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
 
     val boards = mutableStateListOf<InkBoard>()
     val strokes = mutableStateListOf<InkStroke>()
+    val convertedObjects = mutableStateListOf<ConvertedInkObject>()
     val modelProgress = mutableStateMapOf<String, Float>()
     val modelErrors = mutableStateMapOf<String, String>()
 
@@ -64,6 +74,8 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     val currentPoints = mutableStateListOf<InkPoint>()
     val lassoPoints = mutableStateListOf<Offset>()
     var selectedIds by mutableStateOf<Set<String>>(emptySet())
+    var selectedConvertedId by mutableStateOf<String?>(null)
+        private set
     var textProviderId by mutableStateOf("mlkit-ru")
     var mathProviderId by mutableStateOf("pix2text-math")
     var recognition by mutableStateOf<UiRecognition?>(null)
@@ -79,10 +91,11 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         private set
     var eraserCursor by mutableStateOf<Offset?>(null)
 
-    private val undo = ArrayDeque<List<InkStroke>>()
-    private val redo = ArrayDeque<List<InkStroke>>()
+    private val undo = ArrayDeque<DocumentSnapshot>()
+    private val redo = ArrayDeque<DocumentSnapshot>()
     private var eraserGestureChanged = false
     private var movingSelection = false
+    private var movingConverted = false
     private var lastSelectionPoint = Offset.Zero
     private var saveJob: Job? = null
 
@@ -91,6 +104,9 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
 
     val currentSelectionBounds: Rect?
         get() = selectionBounds(strokes, selectedIds)
+
+    val selectedConvertedObject: ConvertedInkObject?
+        get() = selectedConvertedId?.let { id -> convertedObjects.firstOrNull { it.id == id } }
 
     init {
         val loaded = boardRepository.load()
@@ -123,8 +139,9 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         currentBoardId = board.id
         strokes.clear()
         strokes += board.strokes
-        selectedIds = emptySet()
-        lassoPoints.clear()
+        convertedObjects.clear()
+        convertedObjects += board.convertedObjects
+        clearSelection()
         undo.clear()
         redo.clear()
         resetViewport()
@@ -147,7 +164,8 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             subject = subject,
             settings = settings,
             updatedAt = System.currentTimeMillis(),
-            strokes = strokes.toList()
+            strokes = strokes.toList(),
+            convertedObjects = convertedObjects.toList()
         )
         scheduleSave()
     }
@@ -178,9 +196,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
 
     fun screenToCanvas(point: Offset): Offset = (point - viewportOffset) / viewportScale
 
-    fun panBy(delta: Offset) {
-        viewportOffset += delta
-    }
+    fun panBy(delta: Offset) { viewportOffset += delta }
 
     fun zoomBy(factor: Float, centroid: Offset) {
         val nextScale = (viewportScale * factor).coerceIn(0.45f, 4f)
@@ -195,6 +211,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun startStroke(point: InkPoint) {
+        selectedConvertedId = null
         currentPoints.clear()
         currentPoints += point
     }
@@ -232,7 +249,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
 
     fun cancelStroke() { currentPoints.clear() }
 
-    fun beginErase() { eraserGestureChanged = false }
+    fun beginErase() { eraserGestureChanged = false; selectedConvertedId = null }
 
     fun eraseAt(point: Offset) {
         val radius = inputPreferences.eraserRadius / viewportScale
@@ -243,7 +260,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         }
         if (after != before) {
             if (!eraserGestureChanged) {
-                undo.addLast(before)
+                undo.addLast(snapshot())
                 trimHistory(undo)
                 redo.clear()
                 eraserGestureChanged = true
@@ -261,6 +278,30 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun startLasso(point: Offset) {
+        val selectedObject = selectedConvertedObject
+        if (selectedObject != null && selectedObject.bounds().inflate(18f / viewportScale).contains(point)) {
+            pushUndo()
+            movingConverted = true
+            movingSelection = false
+            lastSelectionPoint = point
+            lassoPoints.clear()
+            return
+        }
+
+        val hitObject = convertedObjects.asReversed().firstOrNull { it.bounds().inflate(10f / viewportScale).contains(point) }
+        if (hitObject != null) {
+            selectedConvertedId = hitObject.id
+            selectedIds = emptySet()
+            pushUndo()
+            movingConverted = true
+            movingSelection = false
+            lastSelectionPoint = point
+            lassoPoints.clear()
+            return
+        }
+
+        selectedConvertedId = null
+        movingConverted = false
         val bounds = currentSelectionBounds?.inflate(18f / viewportScale)
         if (bounds?.contains(point) == true) {
             pushUndo()
@@ -276,7 +317,18 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun addLasso(point: Offset) {
-        if (movingSelection) {
+        if (movingConverted) {
+            val id = selectedConvertedId ?: return
+            val delta = point - lastSelectionPoint
+            if (delta != Offset.Zero) {
+                val index = convertedObjects.indexOfFirst { it.id == id }
+                if (index >= 0) {
+                    val item = convertedObjects[index]
+                    convertedObjects[index] = item.copy(x = item.x + delta.x, y = item.y + delta.y)
+                }
+                lastSelectionPoint = point
+            }
+        } else if (movingSelection) {
             val delta = point - lastSelectionPoint
             if (delta != Offset.Zero) {
                 val moved = strokes.map { stroke ->
@@ -292,6 +344,11 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun finishLasso() {
+        if (movingConverted) {
+            movingConverted = false
+            persistCurrentBoard()
+            return
+        }
         if (movingSelection) {
             movingSelection = false
             persistCurrentBoard()
@@ -310,16 +367,36 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 }
             }
         }.mapTo(mutableSetOf()) { it.id }
+        selectedConvertedId = null
         lassoPoints.clear()
     }
 
-    fun clearSelection() { selectedIds = emptySet(); lassoPoints.clear() }
+    fun clearSelection() {
+        selectedIds = emptySet()
+        selectedConvertedId = null
+        lassoPoints.clear()
+    }
+
+    fun selectConvertedObject(id: String) {
+        if (convertedObjects.none { it.id == id }) return
+        selectedConvertedId = id
+        selectedIds = emptySet()
+        lassoPoints.clear()
+    }
 
     fun deleteSelection() {
         if (selectedIds.isEmpty()) return
         pushUndo()
         strokes.removeAll { it.id in selectedIds }
         clearSelection()
+        persistCurrentBoard()
+    }
+
+    fun deleteConvertedSelection() {
+        val id = selectedConvertedId ?: return
+        pushUndo()
+        convertedObjects.removeAll { it.id == id }
+        selectedConvertedId = null
         persistCurrentBoard()
     }
 
@@ -337,22 +414,50 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         persistCurrentBoard()
     }
 
+    fun duplicateConvertedSelection() {
+        val item = selectedConvertedObject ?: return
+        pushUndo()
+        val copy = item.copy(id = UUID.randomUUID().toString(), x = item.x + 22f, y = item.y + 22f)
+        convertedObjects += copy
+        selectedConvertedId = copy.id
+        persistCurrentBoard()
+    }
+
+    fun restoreConvertedSelection() {
+        val item = selectedConvertedObject ?: return
+        pushUndo()
+        val originalBounds = sourceBounds(item.sourceStrokes) ?: item.bounds()
+        val delta = Offset(item.x - originalBounds.left, item.y - originalBounds.top)
+        val restored = item.sourceStrokes.map { stroke ->
+            stroke.copy(
+                id = UUID.randomUUID().toString(),
+                points = stroke.points.map { point -> point.copy(x = point.x + delta.x, y = point.y + delta.y) }
+            )
+        }
+        convertedObjects.removeAll { it.id == item.id }
+        strokes += restored
+        selectedIds = restored.mapTo(mutableSetOf()) { it.id }
+        selectedConvertedId = null
+        persistCurrentBoard()
+    }
+
     fun undo() {
         if (undo.isEmpty()) return
-        redo.addLast(strokes.toList())
+        redo.addLast(snapshot())
         restore(undo.removeLast())
     }
 
     fun redo() {
         if (redo.isEmpty()) return
-        undo.addLast(strokes.toList())
+        undo.addLast(snapshot())
         restore(redo.removeLast())
     }
 
     fun clear() {
-        if (strokes.isEmpty()) return
+        if (strokes.isEmpty() && convertedObjects.isEmpty()) return
         pushUndo()
         strokes.clear()
+        convertedObjects.clear()
         clearSelection()
         persistCurrentBoard()
     }
@@ -365,13 +470,47 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             recognition = UiRecognition(mode, error = "Сначала выделите рукопись лассо")
             return
         }
+        val sourceIds = input.mapTo(mutableSetOf()) { it.id }
         viewModelScope.launch {
-            recognition = UiRecognition(mode, loading = true)
+            recognition = UiRecognition(mode, loading = true, sourceIds = sourceIds)
             runCatching {
                 provider.recognize(context, input, mode)
-            }.onSuccess { recognition = UiRecognition(mode, result = it) }
-                .onFailure { recognition = UiRecognition(mode, error = it.message ?: "Ошибка распознавания") }
+            }.onSuccess { recognition = UiRecognition(mode, result = it, sourceIds = sourceIds) }
+                .onFailure { recognition = UiRecognition(mode, error = it.message ?: "Ошибка распознавания", sourceIds = sourceIds) }
         }
+    }
+
+    fun applyRecognition() {
+        val state = recognition ?: return
+        val result = state.result ?: return
+        val source = strokes.filter { it.id in state.sourceIds }
+        if (source.isEmpty() || result.primary.isBlank()) return
+        val bounds = sourceBounds(source) ?: return
+        pushUndo()
+        strokes.removeAll { it.id in state.sourceIds }
+
+        val isText = state.mode == RecognitionMode.TEXT
+        val textSize = if (isText) (bounds.height * 0.82f).coerceIn(22f, 72f) else (bounds.height * 0.9f).coerceIn(24f, 82f)
+        val width = if (isText) max(bounds.width, result.primary.length * textSize * 0.46f) else max(bounds.width, textSize * 3f)
+        val height = if (isText) max(bounds.height, textSize * 1.35f) else max(bounds.height, textSize * 1.75f)
+        val objectColor = source.firstOrNull()?.color ?: penColor
+        val converted = ConvertedInkObject(
+            kind = if (isText) ConvertedInkKind.TEXT else ConvertedInkKind.MATH,
+            content = result.primary,
+            x = bounds.left,
+            y = bounds.top,
+            width = width,
+            height = height,
+            textSize = textSize,
+            color = objectColor,
+            sourceStrokes = source,
+            providerId = result.providerId
+        )
+        convertedObjects += converted
+        selectedIds = emptySet()
+        selectedConvertedId = converted.id
+        recognition = null
+        persistCurrentBoard()
     }
 
     fun prepareProvider(context: Context, id: String) {
@@ -395,26 +534,45 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     private fun pushUndo() {
-        undo.addLast(strokes.toList())
+        undo.addLast(snapshot())
         trimHistory(undo)
         redo.clear()
     }
 
-    private fun restore(snapshot: List<InkStroke>) {
+    private fun snapshot() = DocumentSnapshot(strokes.toList(), convertedObjects.toList())
+
+    private fun restore(snapshot: DocumentSnapshot) {
         strokes.clear()
-        strokes += snapshot
+        strokes += snapshot.strokes
+        convertedObjects.clear()
+        convertedObjects += snapshot.convertedObjects
         clearSelection()
         persistCurrentBoard()
     }
 
-    private fun trimHistory(history: ArrayDeque<List<InkStroke>>) {
+    private fun sourceBounds(source: List<InkStroke>): Rect? {
+        val points = source.flatMap { it.points }
+        if (points.isEmpty()) return null
+        return Rect(
+            points.minOf { it.x },
+            points.minOf { it.y },
+            points.maxOf { it.x },
+            points.maxOf { it.y }
+        )
+    }
+
+    private fun trimHistory(history: ArrayDeque<DocumentSnapshot>) {
         while (history.size > 50) history.removeFirst()
     }
 
     private fun persistCurrentBoard() {
         val index = boards.indexOfFirst { it.id == currentBoardId }
         if (index < 0) return
-        boards[index] = boards[index].copy(strokes = strokes.toList(), updatedAt = System.currentTimeMillis())
+        boards[index] = boards[index].copy(
+            strokes = strokes.toList(),
+            convertedObjects = convertedObjects.toList(),
+            updatedAt = System.currentTimeMillis()
+        )
         scheduleSave()
     }
 

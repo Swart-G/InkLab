@@ -66,6 +66,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import dev.swart.inklab.core.model.ConvertedInkKind
 import dev.swart.inklab.core.recognition.RecognitionMode
 import dev.swart.inklab.core.storage.EraserMode
 import dev.swart.inklab.core.storage.FingerAction
@@ -111,7 +112,7 @@ fun EditorScreen(vm: EditorViewModel) {
                         modifier = Modifier.align(Alignment.BottomEnd).padding(18.dp)
                     )
 
-                    androidx.compose.animation.AnimatedVisibility(
+                    AnimatedVisibility(
                         visible = vm.selectedIds.isNotEmpty(),
                         enter = fadeIn() + scaleIn(initialScale = 0.92f),
                         exit = fadeOut() + scaleOut(targetScale = 0.92f),
@@ -124,6 +125,22 @@ fun EditorScreen(vm: EditorViewModel) {
                             onCompare = { vm.navigate(AppScreen.LAB) },
                             onDuplicate = vm::duplicateSelection,
                             onDelete = vm::deleteSelection,
+                            onClose = vm::clearSelection
+                        )
+                    }
+
+                    AnimatedVisibility(
+                        visible = vm.selectedConvertedObject != null,
+                        enter = fadeIn() + scaleIn(initialScale = 0.92f),
+                        exit = fadeOut() + scaleOut(targetScale = 0.92f),
+                        modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 22.dp)
+                    ) {
+                        val item = vm.selectedConvertedObject
+                        ConvertedSelectionBar(
+                            kind = item?.kind,
+                            onRestore = vm::restoreConvertedSelection,
+                            onDuplicate = vm::duplicateConvertedSelection,
+                            onDelete = vm::deleteConvertedSelection,
                             onClose = vm::clearSelection
                         )
                     }
@@ -291,8 +308,8 @@ private fun EraserOptions(vm: EditorViewModel) {
 private fun LassoOptions(vm: EditorViewModel, dismiss: () -> Unit) {
     Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Text("Лассо", fontWeight = FontWeight.SemiBold)
-        Text("Обведите штрихи. Потяните внутри рамки, чтобы переместить выделение.", color = InkColors.Muted, style = MaterialTheme.typography.bodySmall)
-        if (vm.selectedIds.isNotEmpty()) FilledTonalButton(onClick = { vm.clearSelection(); dismiss() }) {
+        Text("Обведите рукопись. Нажмите на преобразованный текст или формулу, чтобы выбрать и переместить объект.", color = InkColors.Muted, style = MaterialTheme.typography.bodySmall)
+        if (vm.selectedIds.isNotEmpty() || vm.selectedConvertedObject != null) FilledTonalButton(onClick = { vm.clearSelection(); dismiss() }) {
             Icon(Icons.Outlined.Close, null); Spacer(Modifier.width(6.dp)); Text("Снять выделение")
         }
     }
@@ -338,12 +355,35 @@ private fun SelectionBar(
 }
 
 @Composable
+private fun ConvertedSelectionBar(
+    kind: ConvertedInkKind?,
+    onRestore: () -> Unit,
+    onDuplicate: () -> Unit,
+    onDelete: () -> Unit,
+    onClose: () -> Unit
+) {
+    GlassPanel {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Icon(if (kind == ConvertedInkKind.MATH) Icons.Outlined.Functions else Icons.Outlined.TextFields, null, tint = InkColors.Accent, modifier = Modifier.padding(horizontal = 8.dp))
+            Text(if (kind == ConvertedInkKind.MATH) "Формула" else "Текст", style = MaterialTheme.typography.labelLarge, color = InkColors.Muted)
+            Spacer(Modifier.width(10.dp))
+            FilledTonalButton(onClick = onRestore, colors = ButtonDefaults.filledTonalButtonColors(containerColor = InkColors.AccentSoft)) {
+                Icon(Icons.Outlined.Undo, null); Spacer(Modifier.width(8.dp)); Text("Вернуть рукопись")
+            }
+            IconButton(onClick = onDuplicate) { Icon(Icons.Outlined.ContentCopy, "Дублировать") }
+            IconButton(onClick = onDelete) { Icon(Icons.Outlined.DeleteOutline, "Удалить") }
+            IconButton(onClick = onClose) { Icon(Icons.Outlined.Close, "Снять выделение") }
+        }
+    }
+}
+
+@Composable
 private fun RecognitionDialog(vm: EditorViewModel, mode: RecognitionMode) {
     val state = vm.recognition ?: return
     androidx.compose.material3.AlertDialog(
         onDismissRequest = { vm.recognition = null },
         icon = { Icon(if (mode == RecognitionMode.TEXT) Icons.Outlined.TextFields else Icons.Outlined.Functions, null) },
-        title = { Text(if (mode == RecognitionMode.TEXT) "Распознанный текст" else "LaTeX формулы") },
+        title = { Text(if (mode == RecognitionMode.TEXT) "Заменить рукопись текстом" else "Заменить рукопись формулой") },
         text = {
             when {
                 state.loading -> Row(verticalAlignment = Alignment.CenterVertically) {
@@ -351,15 +391,27 @@ private fun RecognitionDialog(vm: EditorViewModel, mode: RecognitionMode) {
                     Spacer(Modifier.width(12.dp)); Text("Локальное распознавание…")
                 }
                 state.error != null -> Text(state.error, color = MaterialTheme.colorScheme.error)
-                state.result != null -> Column {
+                state.result != null -> Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(state.result.primary.ifBlank { "Нет результата" }, style = MaterialTheme.typography.headlineSmall)
-                    Spacer(Modifier.size(12.dp))
+                    Text(
+                        if (mode == RecognitionMode.TEXT)
+                            "Результат будет отрисован рукописным шрифтом. Исходные штрихи сохранятся внутри объекта."
+                        else
+                            "LaTeX будет отрисован математическим движком. Исходные штрихи сохранятся внутри объекта.",
+                        color = InkColors.Muted,
+                        style = MaterialTheme.typography.bodySmall
+                    )
                     Text("${state.result.latencyMs} мс · ${state.result.providerId}", color = InkColors.Muted, style = MaterialTheme.typography.bodySmall)
                     state.result.note?.let { Text(it, color = InkColors.Muted, style = MaterialTheme.typography.bodySmall) }
                 }
             }
         },
-        confirmButton = { androidx.compose.material3.TextButton(onClick = { vm.recognition = null }) { Text("Готово") } },
-        dismissButton = { androidx.compose.material3.TextButton(onClick = { vm.recognition = null }) { Text("Закрыть") } }
+        confirmButton = {
+            androidx.compose.material3.TextButton(
+                enabled = state.result?.primary?.isNotBlank() == true,
+                onClick = vm::applyRecognition
+            ) { Text("Заменить") }
+        },
+        dismissButton = { androidx.compose.material3.TextButton(onClick = { vm.recognition = null }) { Text("Отмена") } }
     )
 }

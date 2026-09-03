@@ -4,6 +4,8 @@ import android.content.Context
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.toArgb
 import dev.swart.inklab.core.model.BoardSettings
+import dev.swart.inklab.core.model.ConvertedInkKind
+import dev.swart.inklab.core.model.ConvertedInkObject
 import dev.swart.inklab.core.model.InkBoard
 import dev.swart.inklab.core.model.InkPoint
 import dev.swart.inklab.core.model.InkStroke
@@ -11,6 +13,7 @@ import dev.swart.inklab.core.model.PaperPattern
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
+import java.util.UUID
 
 class BoardRepository(context: Context) {
     private val file = File(context.filesDir, "boards.json")
@@ -45,26 +48,63 @@ class BoardRepository(context: Context) {
             put("paperColor", settings.paperColor)
             put("showMargin", settings.showMargin)
         })
-        put("strokes", JSONArray().apply {
-            strokes.forEach { stroke ->
+        put("strokes", JSONArray().apply { strokes.forEach { put(it.toJson()) } })
+        put("convertedObjects", JSONArray().apply {
+            convertedObjects.forEach { item ->
                 put(JSONObject().apply {
-                    put("id", stroke.id)
-                    put("width", stroke.width.toDouble())
-                    put("color", stroke.color.toArgb())
-                    put("points", JSONArray().apply {
-                        stroke.points.forEach { point ->
-                            put(JSONArray().apply {
-                                put(point.x.toDouble())
-                                put(point.y.toDouble())
-                                put(point.timestamp)
-                                put(point.pressure.toDouble())
-                                put(point.tilt.toDouble())
-                            })
-                        }
+                    put("id", item.id)
+                    put("kind", item.kind.name)
+                    put("content", item.content)
+                    put("x", item.x.toDouble())
+                    put("y", item.y.toDouble())
+                    put("width", item.width.toDouble())
+                    put("height", item.height.toDouble())
+                    put("textSize", item.textSize.toDouble())
+                    put("color", item.color.toArgb())
+                    put("providerId", item.providerId)
+                    put("sourceStrokes", JSONArray().apply {
+                        item.sourceStrokes.forEach { put(it.toJson()) }
                     })
                 })
             }
         })
+    }
+
+    private fun InkStroke.toJson() = JSONObject().apply {
+        put("id", id)
+        put("width", width.toDouble())
+        put("color", color.toArgb())
+        put("points", JSONArray().apply {
+            points.forEach { point ->
+                put(JSONArray().apply {
+                    put(point.x.toDouble())
+                    put(point.y.toDouble())
+                    put(point.timestamp)
+                    put(point.pressure.toDouble())
+                    put(point.tilt.toDouble())
+                })
+            }
+        })
+    }
+
+    private fun JSONObject.toStroke(): InkStroke {
+        val pointsJson = optJSONArray("points") ?: JSONArray()
+        val points = List(pointsJson.length()) { pointIndex ->
+            val point = pointsJson.getJSONArray(pointIndex)
+            InkPoint(
+                x = point.getDouble(0).toFloat(),
+                y = point.getDouble(1).toFloat(),
+                timestamp = point.optLong(2, 0L),
+                pressure = point.optDouble(3, 1.0).toFloat(),
+                tilt = point.optDouble(4, 0.0).toFloat()
+            )
+        }
+        return InkStroke(
+            id = optString("id", UUID.randomUUID().toString()),
+            points = points,
+            width = optDouble("width", 5.0).toFloat(),
+            color = Color(optInt("color", 0xFF25272C.toInt()))
+        )
     }
 
     private fun JSONObject.toBoard(): InkBoard {
@@ -77,34 +117,37 @@ class BoardRepository(context: Context) {
             showMargin = settingsJson.optBoolean("showMargin", false)
         )
         val strokesJson = optJSONArray("strokes") ?: JSONArray()
-        val strokes = List(strokesJson.length()) { strokeIndex ->
-            val stroke = strokesJson.getJSONObject(strokeIndex)
-            val pointsJson = stroke.optJSONArray("points") ?: JSONArray()
-            val points = List(pointsJson.length()) { pointIndex ->
-                val point = pointsJson.getJSONArray(pointIndex)
-                InkPoint(
-                    x = point.getDouble(0).toFloat(),
-                    y = point.getDouble(1).toFloat(),
-                    timestamp = point.optLong(2, 0L),
-                    pressure = point.optDouble(3, 1.0).toFloat(),
-                    tilt = point.optDouble(4, 0.0).toFloat()
-                )
-            }
-            InkStroke(
-                id = stroke.optString("id", java.util.UUID.randomUUID().toString()),
-                points = points,
-                width = stroke.optDouble("width", 5.0).toFloat(),
-                color = Color(stroke.optInt("color", 0xFF25272C.toInt()))
+        val strokes = List(strokesJson.length()) { strokeIndex -> strokesJson.getJSONObject(strokeIndex).toStroke() }
+
+        val convertedJson = optJSONArray("convertedObjects") ?: JSONArray()
+        val convertedObjects = List(convertedJson.length()) { itemIndex ->
+            val item = convertedJson.getJSONObject(itemIndex)
+            val sourceJson = item.optJSONArray("sourceStrokes") ?: JSONArray()
+            ConvertedInkObject(
+                id = item.optString("id", UUID.randomUUID().toString()),
+                kind = runCatching { ConvertedInkKind.valueOf(item.optString("kind", ConvertedInkKind.TEXT.name)) }
+                    .getOrDefault(ConvertedInkKind.TEXT),
+                content = item.optString("content", ""),
+                x = item.optDouble("x", 0.0).toFloat(),
+                y = item.optDouble("y", 0.0).toFloat(),
+                width = item.optDouble("width", 160.0).toFloat(),
+                height = item.optDouble("height", 48.0).toFloat(),
+                textSize = item.optDouble("textSize", 32.0).toFloat(),
+                color = Color(item.optInt("color", 0xFF25272C.toInt())),
+                sourceStrokes = List(sourceJson.length()) { sourceIndex -> sourceJson.getJSONObject(sourceIndex).toStroke() },
+                providerId = item.optString("providerId", "")
             )
         }
+
         return InkBoard(
-            id = optString("id", java.util.UUID.randomUUID().toString()),
+            id = optString("id", UUID.randomUUID().toString()),
             title = optString("title", "Без названия"),
             subject = optString("subject", ""),
             createdAt = optLong("createdAt", System.currentTimeMillis()),
             updatedAt = optLong("updatedAt", System.currentTimeMillis()),
             settings = settings,
-            strokes = strokes
+            strokes = strokes,
+            convertedObjects = convertedObjects
         )
     }
 }

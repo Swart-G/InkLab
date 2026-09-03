@@ -99,6 +99,9 @@ dependencies {
     // Real local handwriting recognizer. Language models are downloaded on-device.
     implementation("com.google.mlkit:digital-ink-recognition:19.0.0")
 
+    // Offline LaTeX renderer for converted formula objects.
+    implementation("ru.noties:jlatexmath-android:0.2.0")
+
     debugImplementation("androidx.compose.ui:ui-tooling")
     debugImplementation("androidx.compose.ui:ui-test-manifest")
 

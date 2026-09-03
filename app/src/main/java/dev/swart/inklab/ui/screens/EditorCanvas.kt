@@ -1,5 +1,7 @@
 package dev.swart.inklab.ui.screens
 
+import android.graphics.Paint
+import android.graphics.Typeface
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -8,6 +10,7 @@ import androidx.compose.foundation.gestures.calculatePan
 import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
@@ -16,14 +19,16 @@ import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Fill
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.drawscope.withTransform
+import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.PointerType
 import androidx.compose.ui.input.pointer.isSecondaryPressed
 import androidx.compose.ui.input.pointer.isTertiaryPressed
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChanged
-import androidx.compose.ui.unit.dp
+import dev.swart.inklab.core.model.ConvertedInkKind
 import dev.swart.inklab.core.model.InkPoint
 import dev.swart.inklab.core.model.PaperPattern
 import dev.swart.inklab.core.storage.FingerAction
@@ -31,16 +36,25 @@ import dev.swart.inklab.ui.CanvasInputSource
 import dev.swart.inklab.ui.EditorTool
 import dev.swart.inklab.ui.EditorViewModel
 import dev.swart.inklab.ui.theme.InkColors
+import ru.noties.jlatexmath.JLatexMathDrawable
 import kotlin.math.floor
 
 @Composable
 fun EditorCanvas(vm: EditorViewModel, modifier: Modifier = Modifier) {
     val boardSettings = vm.currentBoard?.settings
     val paperColor = boardSettings?.paperColor?.let(::Color) ?: InkColors.PaperRaised
+    val mathCache = remember { mutableMapOf<String, JLatexMathDrawable?>() }
+    val textPaint = remember {
+        Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            typeface = Typeface.create("cursive", Typeface.NORMAL)
+            isSubpixelText = true
+        }
+    }
+
     Canvas(
         modifier = modifier
             .background(paperColor)
-            .pointerInput(vm.tool, vm.inputPreferences, vm.viewportScale) {
+            .pointerInput(vm.tool, vm.inputPreferences, vm.viewportScale, vm.convertedObjects.size) {
                 awaitEachGesture {
                     val firstEvent = awaitPointerEvent(PointerEventPass.Initial)
                     val down = firstEvent.changes.firstOrNull { it.pressed } ?: return@awaitEachGesture
@@ -186,6 +200,79 @@ fun EditorCanvas(vm: EditorViewModel, modifier: Modifier = Modifier) {
 
             vm.strokes.forEach { drawStroke(it.points, it.width, it.color, it.id in vm.selectedIds) }
             drawStroke(vm.currentPoints, vm.penWidth, vm.penColor)
+
+            vm.convertedObjects.forEach { item ->
+                if (item.kind == ConvertedInkKind.TEXT) {
+                    drawIntoCanvas { canvas ->
+                        textPaint.color = item.color.toArgb()
+                        textPaint.textSize = item.textSize
+                        textPaint.typeface = Typeface.create("cursive", Typeface.NORMAL)
+                        val native = canvas.nativeCanvas
+                        val words = item.content.replace('\n', ' ').split(Regex("\\s+")).filter { it.isNotBlank() }
+                        val maxWidth = item.width.coerceAtLeast(item.textSize * 2f)
+                        val lineHeight = item.textSize * 1.16f
+                        var line = ""
+                        var y = item.y + item.textSize
+                        for (word in words) {
+                            val candidate = if (line.isEmpty()) word else "$line $word"
+                            if (line.isNotEmpty() && textPaint.measureText(candidate) > maxWidth) {
+                                native.drawText(line, item.x, y, textPaint)
+                                line = word
+                                y += lineHeight
+                            } else {
+                                line = candidate
+                            }
+                        }
+                        if (line.isNotEmpty()) native.drawText(line, item.x, y, textPaint)
+                    }
+                } else {
+                    val cacheKey = "${item.content}|${item.textSize.toInt()}|${item.color.toArgb()}"
+                    val drawable = mathCache.getOrPut(cacheKey) {
+                        runCatching {
+                            JLatexMathDrawable.builder(item.content)
+                                .textSize(item.textSize)
+                                .color(item.color.toArgb())
+                                .align(JLatexMathDrawable.ALIGN_LEFT)
+                                .build()
+                        }.getOrNull()
+                    }
+                    if (drawable != null) {
+                        drawIntoCanvas { canvas ->
+                            drawable.setBounds(
+                                item.x.toInt(),
+                                item.y.toInt(),
+                                (item.x + item.width).toInt(),
+                                (item.y + item.height).toInt()
+                            )
+                            drawable.draw(canvas.nativeCanvas)
+                        }
+                    } else {
+                        drawIntoCanvas { canvas ->
+                            textPaint.color = item.color.toArgb()
+                            textPaint.textSize = item.textSize * 0.62f
+                            textPaint.typeface = Typeface.MONOSPACE
+                            canvas.nativeCanvas.drawText(item.content, item.x, item.y + item.textSize, textPaint)
+                        }
+                    }
+                }
+
+                if (item.id == vm.selectedConvertedId) {
+                    drawRoundRect(
+                        color = InkColors.Accent.copy(alpha = 0.07f),
+                        topLeft = item.bounds().topLeft - Offset(8f / scale, 8f / scale),
+                        size = androidx.compose.ui.geometry.Size(item.width + 16f / scale, item.height + 16f / scale),
+                        cornerRadius = androidx.compose.ui.geometry.CornerRadius(11f / scale),
+                        style = Fill
+                    )
+                    drawRoundRect(
+                        color = InkColors.Accent,
+                        topLeft = item.bounds().topLeft - Offset(8f / scale, 8f / scale),
+                        size = androidx.compose.ui.geometry.Size(item.width + 16f / scale, item.height + 16f / scale),
+                        cornerRadius = androidx.compose.ui.geometry.CornerRadius(11f / scale),
+                        style = Stroke(1.7f / scale, pathEffect = PathEffect.dashPathEffect(floatArrayOf(7f / scale, 5f / scale)))
+                    )
+                }
+            }
 
             if (vm.lassoPoints.size > 1) {
                 val path = Path().apply {

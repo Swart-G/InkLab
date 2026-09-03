@@ -1,6 +1,7 @@
 package dev.swart.inklab.core.model
 
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import java.util.UUID
 
@@ -21,6 +22,24 @@ data class InkStroke(
     val color: Color = Color(0xFF25272C)
 )
 
+enum class ConvertedInkKind { TEXT, MATH }
+
+data class ConvertedInkObject(
+    val id: String = UUID.randomUUID().toString(),
+    val kind: ConvertedInkKind,
+    val content: String,
+    val x: Float,
+    val y: Float,
+    val width: Float,
+    val height: Float,
+    val textSize: Float,
+    val color: Color = Color(0xFF25272C),
+    val sourceStrokes: List<InkStroke>,
+    val providerId: String = ""
+) {
+    fun bounds() = Rect(x, y, x + width, y + height)
+}
+
 enum class PaperPattern { RULED, GRID, DOTS, BLANK }
 
 data class BoardSettings(
@@ -37,5 +56,6 @@ data class InkBoard(
     val createdAt: Long = System.currentTimeMillis(),
     val updatedAt: Long = System.currentTimeMillis(),
     val settings: BoardSettings = BoardSettings(),
-    val strokes: List<InkStroke> = emptyList()
+    val strokes: List<InkStroke> = emptyList(),
+    val convertedObjects: List<ConvertedInkObject> = emptyList()
 )

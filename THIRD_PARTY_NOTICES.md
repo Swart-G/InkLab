@@ -23,6 +23,13 @@
 
 The model files are bundled in the APK. On first use, the application copies them to private storage and verifies their expected byte size and SHA-256.
 
+## JLatexMath Android
+
+- Android dependency: `ru.noties:jlatexmath-android:0.2.0`.
+- Used for offline rendering of converted LaTeX formula objects.
+- License: GNU GPL v2.
+- Source: https://github.com/noties/jlatexmath-android
+
 ## MyScript iink
 
 MyScript binaries and recognition resources are not redistributed or shown as available engines. A developer must obtain and accept the applicable MyScript license before adding a private SDK package.
