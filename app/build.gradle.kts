@@ -1,3 +1,6 @@
+import java.net.URI
+import java.security.MessageDigest
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.plugin.compose")
@@ -56,14 +59,14 @@ val prepareBundledModels by tasks.registering {
             if (!file.isFile || file.length() != metadata.second) {
                 val partial = file.resolveSibling("${file.name}.part")
                 partial.delete()
-                java.net.URI(metadata.first).toURL().openStream().buffered().use { input ->
+                URI(metadata.first).toURL().openStream().buffered().use { input ->
                     partial.outputStream().buffered().use { output -> input.copyTo(output) }
                 }
                 file.delete()
                 check(partial.renameTo(file)) { "Could not install bundled model: $name" }
             }
             check(file.length() == metadata.second) { "Unexpected size for bundled model: $name" }
-            val digest = java.security.MessageDigest.getInstance("SHA-256")
+            val digest = MessageDigest.getInstance("SHA-256")
             file.inputStream().buffered().use { input ->
                 val buffer = ByteArray(DEFAULT_BUFFER_SIZE)
                 while (true) {
