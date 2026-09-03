@@ -10,7 +10,11 @@ import androidx.compose.foundation.gestures.calculatePan
 import androidx.compose.foundation.gestures.calculateZoom
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
@@ -29,21 +33,28 @@ import androidx.compose.ui.input.pointer.isTertiaryPressed
 import androidx.compose.ui.input.pointer.isPrimaryPressed
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChanged
+import dev.swart.inklab.core.ink.autoRecognizeShape
 import dev.swart.inklab.core.model.ConvertedInkKind
+import dev.swart.inklab.core.model.DocumentFormat
 import dev.swart.inklab.core.model.InkPoint
+import dev.swart.inklab.core.model.InkStroke
 import dev.swart.inklab.core.model.PaperPattern
 import dev.swart.inklab.ui.CanvasInputSource
 import dev.swart.inklab.ui.EditorTool
 import dev.swart.inklab.ui.EditorViewModel
 import dev.swart.inklab.ui.theme.InkColors
+import kotlinx.coroutines.delay
 import ru.noties.jlatexmath.JLatexMathDrawable
 import kotlin.math.floor
 import kotlin.math.abs
 import kotlin.math.min
 
+private const val SHAPE_HOLD_MS = 520L
+
 @Composable
 fun EditorCanvas(vm: EditorViewModel, modifier: Modifier = Modifier) {
     val boardSettings = vm.currentBoard?.settings
+    val notebook = vm.currentBoard?.format == DocumentFormat.NOTEBOOK
     val paperColor = boardSettings?.paperColor?.let(::Color) ?: InkColors.PaperRaised
     val mathCache = remember { mutableMapOf<String, JLatexMathDrawable?>() }
     val textPaint = remember {
@@ -52,11 +63,35 @@ fun EditorCanvas(vm: EditorViewModel, modifier: Modifier = Modifier) {
             isSubpixelText = true
         }
     }
+    var shapePreview by remember { mutableStateOf<InkStroke?>(null) }
+    val lastPointTimestamp = vm.currentPoints.lastOrNull()?.timestamp
+
+    LaunchedEffect(lastPointTimestamp, vm.stylusInContact, vm.tool, vm.inputPreferences.autoShapes) {
+        shapePreview = null
+        if (
+            vm.stylusInContact &&
+            vm.tool == EditorTool.PEN &&
+            vm.inputPreferences.autoShapes &&
+            lastPointTimestamp != null &&
+            vm.currentPoints.size > 1
+        ) {
+            delay(SHAPE_HOLD_MS)
+            if (
+                vm.stylusInContact &&
+                vm.currentPoints.lastOrNull()?.timestamp == lastPointTimestamp &&
+                vm.currentPoints.size > 1
+            ) {
+                val raw = InkStroke(points = vm.currentPoints.toList(), width = vm.penWidth, color = vm.penColor)
+                val corrected = autoRecognizeShape(raw)
+                if (corrected.points != raw.points) shapePreview = corrected
+            }
+        }
+    }
 
     Canvas(
         modifier = modifier
             .background(paperColor)
-            .pointerInput(vm.tool, vm.inputPreferences) {
+            .pointerInput(vm.tool, vm.inputPreferences, notebook) {
                 awaitEachGesture {
                     val firstEvent = awaitPointerEvent(PointerEventPass.Initial)
                     val down = firstEvent.changes.firstOrNull { it.pressed } ?: return@awaitEachGesture
@@ -90,18 +125,18 @@ fun EditorCanvas(vm: EditorViewModel, modifier: Modifier = Modifier) {
                             val pan = event.calculatePan()
                             if (pressed.size >= 2) {
                                 usedTwoFingers = true
-                                if (zoom.isFinite() && abs(zoom - 1f) > 0.002f) {
+                                if (!notebook && zoom.isFinite() && abs(zoom - 1f) > 0.002f) {
                                     vm.zoomBy(zoom, centroid)
                                     if (abs(zoom - 1f) > 0.015f) transformed = true
                                 }
-                                if (pan.getDistance() > 0.7f) {
+                                if (!notebook && pan.getDistance() > 0.7f) {
                                     vm.panBy(pan)
                                     if (pan.getDistance() > viewConfiguration.touchSlop / 2f) transformed = true
                                 }
                             } else if (!usedTwoFingers && pressed.isNotEmpty()) {
                                 val distance = (pressed.first().position - startPosition).getDistance()
                                 if (distance > viewConfiguration.touchSlop) oneFingerDrag = true
-                                if (oneFingerDrag && pan != Offset.Zero) vm.panBy(pan)
+                                if (!notebook && oneFingerDrag && pan != Offset.Zero) vm.panBy(pan)
                             }
                             event.changes.forEach { if (it.positionChanged()) it.consume() }
                             event = awaitPointerEvent(PointerEventPass.Initial)
@@ -154,8 +189,11 @@ fun EditorCanvas(vm: EditorViewModel, modifier: Modifier = Modifier) {
                         change.consume()
                     }
 
+                    val heldAtEndMs = if (activeTool == EditorTool.PEN && isStylus) {
+                        System.currentTimeMillis() - (vm.currentPoints.lastOrNull()?.timestamp ?: System.currentTimeMillis())
+                    } else 0L
                     when (activeTool) {
-                        EditorTool.PEN -> vm.finishStroke()
+                        EditorTool.PEN -> vm.finishStroke(snapToShape = isStylus && heldAtEndMs >= SHAPE_HOLD_MS)
                         EditorTool.ERASER -> vm.finishErase()
                         EditorTool.LASSO -> vm.finishLasso()
                     }
@@ -225,7 +263,9 @@ fun EditorCanvas(vm: EditorViewModel, modifier: Modifier = Modifier) {
             }
 
             vm.strokes.forEach { drawStroke(it.points, it.width, it.color, it.id in vm.selectedIds) }
-            drawStroke(vm.currentPoints, vm.penWidth, vm.penColor)
+            shapePreview?.let { preview ->
+                drawStroke(preview.points, preview.width, preview.color)
+            } ?: drawStroke(vm.currentPoints, vm.penWidth, vm.penColor)
 
             vm.convertedObjects.forEach { item ->
                 if (item.kind == ConvertedInkKind.TEXT) {

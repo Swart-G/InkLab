@@ -8,6 +8,7 @@ import dev.swart.inklab.core.model.ConvertedInkKind
 import dev.swart.inklab.core.model.ConvertedInkObject
 import dev.swart.inklab.core.model.DocumentFormat
 import dev.swart.inklab.core.model.InkBoard
+import dev.swart.inklab.core.model.InkFolder
 import dev.swart.inklab.core.model.InkPage
 import dev.swart.inklab.core.model.InkPoint
 import dev.swart.inklab.core.model.InkStroke
@@ -20,6 +21,7 @@ import java.util.UUID
 
 class BoardRepository(context: Context) {
     private val file = File(context.filesDir, "boards.json")
+    private val foldersFile = File(context.filesDir, "folders.json")
 
     fun load(): List<InkBoard> = runCatching {
         if (!file.exists()) return emptyList()
@@ -27,14 +29,48 @@ class BoardRepository(context: Context) {
         List(root.length()) { index -> root.getJSONObject(index).toBoard() }
     }.getOrDefault(emptyList())
 
+    fun loadFolders(): List<InkFolder> = runCatching {
+        if (!foldersFile.exists()) return emptyList()
+        val root = JSONArray(foldersFile.readText())
+        List(root.length()) { index ->
+            val item = root.getJSONObject(index)
+            InkFolder(
+                id = item.optString("id", UUID.randomUUID().toString()),
+                title = item.optString("title", "Новая папка"),
+                parentId = item.optString("parentId", "").takeIf { it.isNotBlank() },
+                createdAt = item.optLong("createdAt", System.currentTimeMillis()),
+                updatedAt = item.optLong("updatedAt", System.currentTimeMillis())
+            )
+        }
+    }.getOrDefault(emptyList())
+
     @Synchronized
     fun save(boards: List<InkBoard>) {
         val root = JSONArray()
         boards.forEach { root.put(it.toJson()) }
-        val temporary = File(file.parentFile, "${file.name}.tmp")
-        temporary.writeText(root.toString())
-        check(temporary.renameTo(file) || run {
-            temporary.copyTo(file, overwrite = true)
+        writeAtomic(file, root.toString())
+    }
+
+    @Synchronized
+    fun saveFolders(folders: List<InkFolder>) {
+        val root = JSONArray()
+        folders.forEach { folder ->
+            root.put(JSONObject().apply {
+                put("id", folder.id)
+                put("title", folder.title)
+                put("parentId", folder.parentId ?: JSONObject.NULL)
+                put("createdAt", folder.createdAt)
+                put("updatedAt", folder.updatedAt)
+            })
+        }
+        writeAtomic(foldersFile, root.toString())
+    }
+
+    private fun writeAtomic(target: File, content: String) {
+        val temporary = File(target.parentFile, "${target.name}.tmp")
+        temporary.writeText(content)
+        check(temporary.renameTo(target) || run {
+            temporary.copyTo(target, overwrite = true)
             temporary.delete()
         })
     }
@@ -48,6 +84,7 @@ class BoardRepository(context: Context) {
         put("format", format.name)
         put("orientation", orientation.name)
         put("lastPageIndex", lastPageIndex)
+        put("folderId", folderId ?: JSONObject.NULL)
         put("settings", JSONObject().apply {
             put("pattern", settings.pattern.name)
             put("spacing", settings.spacing.toDouble())
@@ -182,7 +219,8 @@ class BoardRepository(context: Context) {
                 .getOrDefault(PageOrientation.PORTRAIT),
             settings = settings,
             pages = pages,
-            lastPageIndex = optInt("lastPageIndex", 0).coerceIn(0, pages.lastIndex)
+            lastPageIndex = optInt("lastPageIndex", 0).coerceIn(0, pages.lastIndex),
+            folderId = optString("folderId", "").takeIf { it.isNotBlank() }
         )
     }
 }
@@ -190,6 +228,13 @@ class BoardRepository(context: Context) {
 enum class FingerAction { PAN, DRAW, ERASE, IGNORE }
 enum class StylusButtonAction { ERASE, LASSO, IGNORE }
 enum class EraserMode { PIXEL, STROKE }
+
+private val defaultQuickPenColors = listOf(
+    0xFF25272C.toInt(),
+    0xFF246BCE.toInt(),
+    0xFFE05A47.toInt(),
+    0xFF0D8B65.toInt()
+)
 
 data class InputPreferences(
     val fingerAction: FingerAction = FingerAction.PAN,
@@ -200,6 +245,7 @@ data class InputPreferences(
     val pressureEnabled: Boolean = true,
     val autoShapes: Boolean = true,
     val penColor: Int = 0xFF25272C.toInt(),
+    val quickPenColors: List<Int> = defaultQuickPenColors,
     val darkTheme: Boolean = false
 )
 
@@ -215,6 +261,11 @@ class InputPreferencesRepository(context: Context) {
         pressureEnabled = preferences.getBoolean("pressureEnabled", true),
         autoShapes = preferences.getBoolean("autoShapes", true),
         penColor = preferences.getInt("penColor", 0xFF25272C.toInt()),
+        quickPenColors = preferences.getString("quickPenColors", null)
+            ?.split(',')
+            ?.mapNotNull { token -> token.toLongOrNull(16)?.toInt() }
+            ?.takeIf { it.size == 4 }
+            ?: defaultQuickPenColors,
         darkTheme = preferences.getBoolean("darkTheme", false)
     )
 
@@ -228,6 +279,7 @@ class InputPreferencesRepository(context: Context) {
             .putBoolean("pressureEnabled", value.pressureEnabled)
             .putBoolean("autoShapes", value.autoShapes)
             .putInt("penColor", value.penColor)
+            .putString("quickPenColors", value.quickPenColors.joinToString(",") { Integer.toUnsignedString(it, 16) })
             .putBoolean("darkTheme", value.darkTheme)
             .apply()
     }
