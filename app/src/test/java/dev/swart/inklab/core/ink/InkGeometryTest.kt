@@ -7,6 +7,9 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import kotlin.math.PI
+import kotlin.math.cos
+import kotlin.math.sin
 
 class InkGeometryTest {
     @Test
@@ -29,6 +32,26 @@ class InkGeometryTest {
         assertEquals(2, fragments.size)
         assertTrue(fragments.first().points.maxOf { it.x } < 50f)
         assertTrue(fragments.last().points.minOf { it.x } > 50f)
+    }
+
+    @Test
+    fun autoShape_straightensConfidentLine() {
+        val input = stroke((0..20).map { index -> Offset(index * 5f, index % 2 * 0.4f) })
+        val result = autoRecognizeShape(input)
+        assertEquals(2, result.points.size)
+        assertEquals(0f, result.points.first().x)
+        assertEquals(100f, result.points.last().x)
+    }
+
+    @Test
+    fun autoShape_regularizesLargeCircle() {
+        val input = stroke((0..48).map { index ->
+            val angle = index / 48f * (2f * PI).toFloat()
+            Offset(100f + cos(angle) * 55f, 120f + sin(angle) * 48f)
+        })
+        val result = autoRecognizeShape(input)
+        assertEquals(49, result.points.size)
+        assertTrue((result.points.first().offset() - result.points.last().offset()).getDistance() < 0.01f)
     }
 
     private fun stroke(points: List<Offset>) = InkStroke(

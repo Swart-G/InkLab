@@ -6,10 +6,13 @@ import androidx.compose.ui.graphics.toArgb
 import dev.swart.inklab.core.model.BoardSettings
 import dev.swart.inklab.core.model.ConvertedInkKind
 import dev.swart.inklab.core.model.ConvertedInkObject
+import dev.swart.inklab.core.model.DocumentFormat
 import dev.swart.inklab.core.model.InkBoard
+import dev.swart.inklab.core.model.InkPage
 import dev.swart.inklab.core.model.InkPoint
 import dev.swart.inklab.core.model.InkStroke
 import dev.swart.inklab.core.model.PaperPattern
+import dev.swart.inklab.core.model.PageOrientation
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -42,32 +45,42 @@ class BoardRepository(context: Context) {
         put("subject", subject)
         put("createdAt", createdAt)
         put("updatedAt", updatedAt)
+        put("format", format.name)
+        put("orientation", orientation.name)
+        put("lastPageIndex", lastPageIndex)
         put("settings", JSONObject().apply {
             put("pattern", settings.pattern.name)
             put("spacing", settings.spacing.toDouble())
             put("paperColor", settings.paperColor)
             put("showMargin", settings.showMargin)
         })
-        put("strokes", JSONArray().apply { strokes.forEach { put(it.toJson()) } })
-        put("convertedObjects", JSONArray().apply {
-            convertedObjects.forEach { item ->
+        put("pages", JSONArray().apply {
+            pages.forEach { page ->
                 put(JSONObject().apply {
-                    put("id", item.id)
-                    put("kind", item.kind.name)
-                    put("content", item.content)
-                    put("x", item.x.toDouble())
-                    put("y", item.y.toDouble())
-                    put("width", item.width.toDouble())
-                    put("height", item.height.toDouble())
-                    put("textSize", item.textSize.toDouble())
-                    put("color", item.color.toArgb())
-                    put("providerId", item.providerId)
-                    put("sourceStrokes", JSONArray().apply {
-                        item.sourceStrokes.forEach { put(it.toJson()) }
-                    })
+                    put("id", page.id)
+                    put("strokes", JSONArray().apply { page.strokes.forEach { put(it.toJson()) } })
+                    put("convertedObjects", page.convertedObjects.toJson())
                 })
             }
         })
+    }
+
+    private fun List<ConvertedInkObject>.toJson() = JSONArray().apply {
+        this@toJson.forEach { item ->
+            put(JSONObject().apply {
+                put("id", item.id)
+                put("kind", item.kind.name)
+                put("content", item.content)
+                put("x", item.x.toDouble())
+                put("y", item.y.toDouble())
+                put("width", item.width.toDouble())
+                put("height", item.height.toDouble())
+                put("textSize", item.textSize.toDouble())
+                put("color", item.color.toArgb())
+                put("providerId", item.providerId)
+                put("sourceStrokes", JSONArray().apply { item.sourceStrokes.forEach { put(it.toJson()) } })
+            })
+        }
     }
 
     private fun InkStroke.toJson() = JSONObject().apply {
@@ -116,11 +129,7 @@ class BoardRepository(context: Context) {
             paperColor = settingsJson.optLong("paperColor", 0xFFFBF9F5),
             showMargin = settingsJson.optBoolean("showMargin", false)
         )
-        val strokesJson = optJSONArray("strokes") ?: JSONArray()
-        val strokes = List(strokesJson.length()) { strokeIndex -> strokesJson.getJSONObject(strokeIndex).toStroke() }
-
-        val convertedJson = optJSONArray("convertedObjects") ?: JSONArray()
-        val convertedObjects = List(convertedJson.length()) { itemIndex ->
+        fun parseConverted(convertedJson: JSONArray): List<ConvertedInkObject> = List(convertedJson.length()) { itemIndex ->
             val item = convertedJson.getJSONObject(itemIndex)
             val sourceJson = item.optJSONArray("sourceStrokes") ?: JSONArray()
             ConvertedInkObject(
@@ -139,15 +148,41 @@ class BoardRepository(context: Context) {
             )
         }
 
+        val pagesJson = optJSONArray("pages")
+        val pages = if (pagesJson != null && pagesJson.length() > 0) {
+            List(pagesJson.length()) { pageIndex ->
+                val page = pagesJson.getJSONObject(pageIndex)
+                val strokesJson = page.optJSONArray("strokes") ?: JSONArray()
+                InkPage(
+                    id = page.optString("id", UUID.randomUUID().toString()),
+                    strokes = List(strokesJson.length()) { strokesJson.getJSONObject(it).toStroke() },
+                    convertedObjects = parseConverted(page.optJSONArray("convertedObjects") ?: JSONArray())
+                )
+            }
+        } else {
+            // Migration from preview builds where every document contained one implicit page.
+            val strokesJson = optJSONArray("strokes") ?: JSONArray()
+            listOf(
+                InkPage(
+                    strokes = List(strokesJson.length()) { strokesJson.getJSONObject(it).toStroke() },
+                    convertedObjects = parseConverted(optJSONArray("convertedObjects") ?: JSONArray())
+                )
+            )
+        }
+
         return InkBoard(
             id = optString("id", UUID.randomUUID().toString()),
             title = optString("title", "Без названия"),
             subject = optString("subject", ""),
             createdAt = optLong("createdAt", System.currentTimeMillis()),
             updatedAt = optLong("updatedAt", System.currentTimeMillis()),
+            format = runCatching { DocumentFormat.valueOf(optString("format", DocumentFormat.BOARD.name)) }
+                .getOrDefault(DocumentFormat.BOARD),
+            orientation = runCatching { PageOrientation.valueOf(optString("orientation", PageOrientation.PORTRAIT.name)) }
+                .getOrDefault(PageOrientation.PORTRAIT),
             settings = settings,
-            strokes = strokes,
-            convertedObjects = convertedObjects
+            pages = pages,
+            lastPageIndex = optInt("lastPageIndex", 0).coerceIn(0, pages.lastIndex)
         )
     }
 }
@@ -162,7 +197,10 @@ data class InputPreferences(
     val eraserMode: EraserMode = EraserMode.PIXEL,
     val eraserRadius: Float = 24f,
     val palmRejection: Boolean = true,
-    val pressureEnabled: Boolean = true
+    val pressureEnabled: Boolean = true,
+    val autoShapes: Boolean = true,
+    val penColor: Int = 0xFF25272C.toInt(),
+    val darkTheme: Boolean = false
 )
 
 class InputPreferencesRepository(context: Context) {
@@ -174,7 +212,10 @@ class InputPreferencesRepository(context: Context) {
         eraserMode = preferences.enum("eraserMode", EraserMode.PIXEL),
         eraserRadius = preferences.getFloat("eraserRadius", 24f),
         palmRejection = preferences.getBoolean("palmRejection", true),
-        pressureEnabled = preferences.getBoolean("pressureEnabled", true)
+        pressureEnabled = preferences.getBoolean("pressureEnabled", true),
+        autoShapes = preferences.getBoolean("autoShapes", true),
+        penColor = preferences.getInt("penColor", 0xFF25272C.toInt()),
+        darkTheme = preferences.getBoolean("darkTheme", false)
     )
 
     fun save(value: InputPreferences) {
@@ -185,6 +226,9 @@ class InputPreferencesRepository(context: Context) {
             .putFloat("eraserRadius", value.eraserRadius)
             .putBoolean("palmRejection", value.palmRejection)
             .putBoolean("pressureEnabled", value.pressureEnabled)
+            .putBoolean("autoShapes", value.autoShapes)
+            .putInt("penColor", value.penColor)
+            .putBoolean("darkTheme", value.darkTheme)
             .apply()
     }
 

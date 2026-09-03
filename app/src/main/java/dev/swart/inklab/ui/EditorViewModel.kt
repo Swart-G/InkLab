@@ -11,25 +11,30 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.toArgb
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import dev.swart.inklab.AppContainer
+import dev.swart.inklab.core.ink.autoRecognizeShape
 import dev.swart.inklab.core.ink.pointInPolygon
 import dev.swart.inklab.core.ink.selectionBounds
 import dev.swart.inklab.core.ink.splitStrokeByCircle
+import dev.swart.inklab.core.ink.strokeBounds
+import dev.swart.inklab.core.ink.strokeHitTest
 import dev.swart.inklab.core.ink.strokeIntersectsCircle
 import dev.swart.inklab.core.model.BoardSettings
 import dev.swart.inklab.core.model.ConvertedInkKind
 import dev.swart.inklab.core.model.ConvertedInkObject
+import dev.swart.inklab.core.model.DocumentFormat
 import dev.swart.inklab.core.model.InkBoard
+import dev.swart.inklab.core.model.InkPage
 import dev.swart.inklab.core.model.InkPoint
 import dev.swart.inklab.core.model.InkStroke
-import dev.swart.inklab.core.recognition.ProviderState
+import dev.swart.inklab.core.model.PageOrientation
 import dev.swart.inklab.core.recognition.RecognitionMode
 import dev.swart.inklab.core.recognition.RecognitionResult
 import dev.swart.inklab.core.storage.BoardRepository
 import dev.swart.inklab.core.storage.EraserMode
-import dev.swart.inklab.core.storage.FingerAction
 import dev.swart.inklab.core.storage.InputPreferences
 import dev.swart.inklab.core.storage.InputPreferencesRepository
 import dev.swart.inklab.core.storage.StylusButtonAction
@@ -42,7 +47,7 @@ import kotlin.math.max
 
 enum class EditorTool { PEN, ERASER, LASSO }
 enum class CanvasInputSource { STYLUS, STYLUS_ERASER, TOUCH, MOUSE }
-enum class AppScreen { EDITOR, BOARDS, SETTINGS, BOARD_SETTINGS, LAB }
+enum class AppScreen { EDITOR, BOARDS, SETTINGS, BOARD_SETTINGS }
 
 data class UiRecognition(
     val mode: RecognitionMode,
@@ -60,6 +65,7 @@ private data class DocumentSnapshot(
 class EditorViewModel(application: Application) : AndroidViewModel(application) {
     private val boardRepository = BoardRepository(application)
     private val inputRepository = InputPreferencesRepository(application)
+    private val initialInputPreferences = inputRepository.load()
 
     val boards = mutableStateListOf<InkBoard>()
     val strokes = mutableStateListOf<InkStroke>()
@@ -70,22 +76,26 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     var screen by mutableStateOf(AppScreen.EDITOR)
     var currentBoardId by mutableStateOf("")
         private set
+    var currentPageIndex by mutableStateOf(0)
+        private set
     var tool by mutableStateOf(EditorTool.PEN)
     val currentPoints = mutableStateListOf<InkPoint>()
     val lassoPoints = mutableStateListOf<Offset>()
     var selectedIds by mutableStateOf<Set<String>>(emptySet())
     var selectedConvertedId by mutableStateOf<String?>(null)
         private set
+    var editingConvertedId by mutableStateOf<String?>(null)
+        private set
     var textProviderId by mutableStateOf("mlkit-ru")
     var mathProviderId by mutableStateOf("pix2text-math")
     var recognition by mutableStateOf<UiRecognition?>(null)
     var penWidth by mutableFloatStateOf(5f)
-    var penColor by mutableStateOf(Color(0xFF25272C))
+    var penColor by mutableStateOf(Color(initialInputPreferences.penColor))
     var viewportScale by mutableFloatStateOf(1f)
         private set
     var viewportOffset by mutableStateOf(Offset.Zero)
         private set
-    var inputPreferences by mutableStateOf(inputRepository.load())
+    var inputPreferences by mutableStateOf(initialInputPreferences)
         private set
     var stylusInContact by mutableStateOf(false)
         private set
@@ -108,9 +118,15 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     val selectedConvertedObject: ConvertedInkObject?
         get() = selectedConvertedId?.let { id -> convertedObjects.firstOrNull { it.id == id } }
 
+    val editingConvertedObject: ConvertedInkObject?
+        get() = editingConvertedId?.let { id -> convertedObjects.firstOrNull { it.id == id } }
+
+    val selectionBounds: Rect?
+        get() = selectedConvertedObject?.bounds() ?: currentSelectionBounds
+
     init {
         val loaded = boardRepository.load()
-        boards += if (loaded.isEmpty()) listOf(InkBoard(title = "Лекция 01", subject = "OCR playground")) else loaded
+        boards += if (loaded.isEmpty()) listOf(InkBoard(title = "Новая доска")) else loaded
         openBoard(boards.first().id, persistPrevious = false)
     }
 
@@ -119,15 +135,27 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         screen = destination
     }
 
-    fun createBoard(): InkBoard {
+    fun createDocument(
+        title: String,
+        format: DocumentFormat,
+        orientation: PageOrientation,
+        settings: BoardSettings = BoardSettings()
+    ): InkBoard {
         persistCurrentBoard()
-        val board = InkBoard(title = "Новая доска")
+        val board = InkBoard(
+            title = title.ifBlank { if (format == DocumentFormat.NOTEBOOK) "Новая тетрадь" else "Новая доска" },
+            format = format,
+            orientation = orientation,
+            settings = settings
+        )
         boards.add(0, board)
         scheduleSave()
         openBoard(board.id, persistPrevious = false)
         screen = AppScreen.EDITOR
         return board
     }
+
+    fun createBoard(): InkBoard = createDocument("Новая доска", DocumentFormat.BOARD, PageOrientation.LANDSCAPE)
 
     fun openBoard(id: String, persistPrevious: Boolean = true) {
         if (id == currentBoardId) {
@@ -137,10 +165,12 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         if (persistPrevious) persistCurrentBoard()
         val board = boards.firstOrNull { it.id == id } ?: return
         currentBoardId = board.id
+        currentPageIndex = board.lastPageIndex.coerceIn(0, board.pages.lastIndex)
+        val page = board.pages[currentPageIndex]
         strokes.clear()
-        strokes += board.strokes
+        strokes += page.strokes
         convertedObjects.clear()
-        convertedObjects += board.convertedObjects
+        convertedObjects += page.convertedObjects
         clearSelection()
         undo.clear()
         redo.clear()
@@ -149,10 +179,19 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun deleteBoard(id: String) {
-        if (boards.size <= 1) return
         val wasCurrent = id == currentBoardId
         boards.removeAll { it.id == id }
-        if (wasCurrent) openBoard(boards.first().id, persistPrevious = false)
+        if (wasCurrent) {
+            val next = boards.firstOrNull()
+            if (next != null) openBoard(next.id, persistPrevious = false) else {
+                currentBoardId = ""
+                currentPageIndex = 0
+                strokes.clear()
+                convertedObjects.clear()
+                clearSelection()
+                screen = AppScreen.BOARDS
+            }
+        }
         scheduleSave()
     }
 
@@ -163,16 +202,56 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             title = title.ifBlank { "Без названия" },
             subject = subject,
             settings = settings,
-            updatedAt = System.currentTimeMillis(),
-            strokes = strokes.toList(),
-            convertedObjects = convertedObjects.toList()
+            updatedAt = System.currentTimeMillis()
         )
+        persistCurrentBoard()
         scheduleSave()
+    }
+
+    fun updatePaperSettings(settings: BoardSettings) {
+        val index = boards.indexOfFirst { it.id == currentBoardId }
+        if (index < 0) return
+        boards[index] = boards[index].copy(settings = settings, updatedAt = System.currentTimeMillis())
+        scheduleSave()
+    }
+
+    fun addPage() {
+        val boardIndex = boards.indexOfFirst { it.id == currentBoardId }
+        if (boardIndex < 0 || boards[boardIndex].format != DocumentFormat.NOTEBOOK) return
+        persistCurrentBoard()
+        val board = boards[boardIndex]
+        val nextPages = board.pages + InkPage()
+        boards[boardIndex] = board.copy(pages = nextPages, lastPageIndex = nextPages.lastIndex, updatedAt = System.currentTimeMillis())
+        loadPage(nextPages.lastIndex)
+    }
+
+    fun openPage(index: Int) {
+        val board = currentBoard ?: return
+        if (index !in board.pages.indices || index == currentPageIndex) return
+        persistCurrentBoard()
+        loadPage(index)
+    }
+
+    fun deleteCurrentPage() {
+        val boardIndex = boards.indexOfFirst { it.id == currentBoardId }
+        if (boardIndex < 0) return
+        persistCurrentBoard()
+        val board = boards[boardIndex]
+        if (board.format != DocumentFormat.NOTEBOOK || board.pages.size <= 1) return
+        val pages = board.pages.toMutableList().also { it.removeAt(currentPageIndex) }
+        val nextIndex = currentPageIndex.coerceAtMost(pages.lastIndex)
+        boards[boardIndex] = board.copy(pages = pages, lastPageIndex = nextIndex, updatedAt = System.currentTimeMillis())
+        loadPage(nextIndex)
     }
 
     fun updateInputPreferences(value: InputPreferences) {
         inputPreferences = value
         inputRepository.save(value)
+    }
+
+    fun setPenColor(color: Color) {
+        penColor = color
+        updateInputPreferences(inputPreferences.copy(penColor = color.toArgb()))
     }
 
     fun effectiveTool(source: CanvasInputSource, sideButton: Boolean): EditorTool? = when (source) {
@@ -184,11 +263,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 StylusButtonAction.IGNORE -> tool
             }
         } else tool
-        CanvasInputSource.TOUCH -> when (inputPreferences.fingerAction) {
-            FingerAction.DRAW -> EditorTool.PEN
-            FingerAction.ERASE -> EditorTool.ERASER
-            FingerAction.PAN, FingerAction.IGNORE -> null
-        }
+        CanvasInputSource.TOUCH -> null
         CanvasInputSource.MOUSE -> tool
     }
 
@@ -240,7 +315,8 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     fun finishStroke() {
         if (currentPoints.size > 1) {
             pushUndo()
-            strokes += InkStroke(points = currentPoints.toList(), width = penWidth, color = penColor)
+            val stroke = InkStroke(points = currentPoints.toList(), width = penWidth, color = penColor)
+            strokes += if (inputPreferences.autoShapes) autoRecognizeShape(stroke) else stroke
             selectedIds = emptySet()
             persistCurrentBoard()
         }
@@ -384,6 +460,46 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         lassoPoints.clear()
     }
 
+    fun selectObjectAt(point: Offset) {
+        val converted = convertedObjects.asReversed().firstOrNull {
+            it.bounds().inflate(14f / viewportScale).contains(point)
+        }
+        if (converted != null) {
+            selectConvertedObject(converted.id)
+            return
+        }
+
+        val hit = strokes.asReversed().firstOrNull { strokeHitTest(it, point, 12f / viewportScale) }
+        if (hit == null) {
+            clearSelection()
+            return
+        }
+
+        // Treat nearby strokes as one handwritten object (usually a word or formula).
+        val selected = linkedSetOf(hit.id)
+        var area = strokeBounds(hit)?.inflate(16f / viewportScale) ?: return
+        var changed: Boolean
+        do {
+            changed = false
+            strokes.forEach { stroke ->
+                if (stroke.id !in selected) {
+                    val bounds = strokeBounds(stroke)?.inflate(10f / viewportScale)
+                    if (bounds != null && area.overlaps(bounds)) {
+                        selected += stroke.id
+                        area = Rect(
+                            minOf(area.left, bounds.left), minOf(area.top, bounds.top),
+                            maxOf(area.right, bounds.right), maxOf(area.bottom, bounds.bottom)
+                        )
+                        changed = true
+                    }
+                }
+            }
+        } while (changed && selected.size < 80)
+        selectedIds = selected
+        selectedConvertedId = null
+        lassoPoints.clear()
+    }
+
     fun deleteSelection() {
         if (selectedIds.isEmpty()) return
         pushUndo()
@@ -441,6 +557,23 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         persistCurrentBoard()
     }
 
+    fun beginEditConverted() {
+        editingConvertedId = selectedConvertedId
+    }
+
+    fun cancelEditConverted() { editingConvertedId = null }
+
+    fun updateConvertedContent(content: String) {
+        val id = editingConvertedId ?: return
+        val index = convertedObjects.indexOfFirst { it.id == id }
+        if (index < 0 || content.isBlank()) return
+        pushUndo()
+        convertedObjects[index] = convertedObjects[index].copy(content = content)
+        editingConvertedId = null
+        selectedConvertedId = id
+        persistCurrentBoard()
+    }
+
     fun undo() {
         if (undo.isEmpty()) return
         redo.addLast(snapshot())
@@ -475,7 +608,10 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             recognition = UiRecognition(mode, loading = true, sourceIds = sourceIds)
             runCatching {
                 provider.recognize(context, input, mode)
-            }.onSuccess { recognition = UiRecognition(mode, result = it, sourceIds = sourceIds) }
+            }.onSuccess {
+                recognition = UiRecognition(mode, result = it, sourceIds = sourceIds)
+                applyRecognition()
+            }
                 .onFailure { recognition = UiRecognition(mode, error = it.message ?: "Ошибка распознавания", sourceIds = sourceIds) }
         }
     }
@@ -490,9 +626,9 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         strokes.removeAll { it.id in state.sourceIds }
 
         val isText = state.mode == RecognitionMode.TEXT
-        val textSize = if (isText) (bounds.height * 0.82f).coerceIn(22f, 72f) else (bounds.height * 0.9f).coerceIn(24f, 82f)
-        val width = if (isText) max(bounds.width, result.primary.length * textSize * 0.46f) else max(bounds.width, textSize * 3f)
-        val height = if (isText) max(bounds.height, textSize * 1.35f) else max(bounds.height, textSize * 1.75f)
+        val textSize = if (isText) (bounds.height * 0.76f).coerceIn(18f, 68f) else (bounds.height * 0.72f).coerceIn(20f, 76f)
+        val width = if (isText) max(bounds.width, result.primary.length * textSize * 0.40f) else bounds.width.coerceAtLeast(textSize * 1.5f)
+        val height = if (isText) max(bounds.height, textSize * 1.20f) else bounds.height.coerceAtLeast(textSize * 1.1f)
         val objectColor = source.firstOrNull()?.color ?: penColor
         val converted = ConvertedInkObject(
             kind = if (isText) ConvertedInkKind.TEXT else ConvertedInkKind.MATH,
@@ -568,11 +704,32 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     private fun persistCurrentBoard() {
         val index = boards.indexOfFirst { it.id == currentBoardId }
         if (index < 0) return
-        boards[index] = boards[index].copy(
-            strokes = strokes.toList(),
-            convertedObjects = convertedObjects.toList(),
+        val board = boards[index]
+        val pages = board.pages.toMutableList()
+        if (currentPageIndex !in pages.indices) return
+        pages[currentPageIndex] = pages[currentPageIndex].copy(
+            strokes = strokes.toList(), convertedObjects = convertedObjects.toList()
+        )
+        boards[index] = board.copy(
+            pages = pages,
+            lastPageIndex = currentPageIndex,
             updatedAt = System.currentTimeMillis()
         )
+        scheduleSave()
+    }
+
+    private fun loadPage(index: Int) {
+        val board = currentBoard ?: return
+        val page = board.pages.getOrNull(index) ?: return
+        currentPageIndex = index
+        strokes.clear()
+        strokes += page.strokes
+        convertedObjects.clear()
+        convertedObjects += page.convertedObjects
+        clearSelection()
+        undo.clear()
+        redo.clear()
+        resetViewport()
         scheduleSave()
     }
 

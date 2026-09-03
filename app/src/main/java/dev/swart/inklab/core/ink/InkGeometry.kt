@@ -6,6 +6,11 @@ import dev.swart.inklab.core.model.InkPoint
 import dev.swart.inklab.core.model.InkStroke
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.PI
+import kotlin.math.abs
+import kotlin.math.cos
+import kotlin.math.hypot
+import kotlin.math.sin
 
 fun pointInPolygon(point: Offset, polygon: List<Offset>): Boolean {
     if (polygon.size < 3) return false
@@ -46,6 +51,84 @@ fun strokeIntersectsCircle(stroke: InkStroke, center: Offset, radius: Float): Bo
     }
 }
 
+fun strokeBounds(stroke: InkStroke): Rect? {
+    if (stroke.points.isEmpty()) return null
+    return Rect(
+        stroke.points.minOf { it.x },
+        stroke.points.minOf { it.y },
+        stroke.points.maxOf { it.x },
+        stroke.points.maxOf { it.y }
+    )
+}
+
+fun strokeHitTest(stroke: InkStroke, point: Offset, tolerance: Float): Boolean =
+    strokeIntersectsCircle(stroke, point, tolerance)
+
+/**
+ * Turns a confidently drawn one-stroke line, rectangle or ellipse into clean vector ink.
+ * Conservative thresholds intentionally leave letters and small marks untouched.
+ */
+fun autoRecognizeShape(stroke: InkStroke): InkStroke {
+    val points = stroke.points
+    if (points.size < 5) return stroke
+    val bounds = strokeBounds(stroke) ?: return stroke
+    val width = bounds.width
+    val height = bounds.height
+    val diagonal = hypot(width, height)
+    if (diagonal < 48f) return stroke
+
+    val pathLength = points.zipWithNext().sumOf { (a, b) ->
+        hypot((b.x - a.x).toDouble(), (b.y - a.y).toDouble())
+    }.toFloat()
+    if (pathLength <= 0f) return stroke
+    val endpoints = (points.last().offset() - points.first().offset()).getDistance()
+
+    // A straight stroke has almost no detour compared with its end-to-end distance.
+    if (endpoints > 42f && endpoints / pathLength > 0.965f) {
+        return stroke.copy(points = listOf(points.first(), points.last()))
+    }
+
+    val closed = endpoints < diagonal * 0.24f
+    if (!closed || width < 38f || height < 38f) return stroke
+
+    val rectanglePerimeter = 2f * (width + height)
+    val nearEdgeRatio = points.count { point ->
+        minOf(
+            abs(point.x - bounds.left), abs(point.x - bounds.right),
+            abs(point.y - bounds.top), abs(point.y - bounds.bottom)
+        ) < diagonal * 0.055f
+    }.toFloat() / points.size
+    if (nearEdgeRatio > 0.72f && pathLength / rectanglePerimeter in 0.72f..1.38f) {
+        val time = points.first().timestamp
+        val pressure = points.map { it.pressure }.average().toFloat()
+        return stroke.copy(points = listOf(
+            InkPoint(bounds.left, bounds.top, time, pressure),
+            InkPoint(bounds.right, bounds.top, time + 1, pressure),
+            InkPoint(bounds.right, bounds.bottom, time + 2, pressure),
+            InkPoint(bounds.left, bounds.bottom, time + 3, pressure),
+            InkPoint(bounds.left, bounds.top, time + 4, pressure)
+        ))
+    }
+
+    val center = bounds.center
+    val rx = width / 2f
+    val ry = height / 2f
+    val radialError = points.map { point ->
+        abs(hypot((point.x - center.x) / rx, (point.y - center.y) / ry) - 1f)
+    }.average().toFloat()
+    if (radialError < 0.18f) {
+        val time = points.first().timestamp
+        val pressure = points.map { it.pressure }.average().toFloat()
+        val clean = (0..48).map { index ->
+            val angle = index / 48f * (2f * PI).toFloat()
+            InkPoint(center.x + cos(angle) * rx, center.y + sin(angle) * ry, time + index, pressure)
+        }
+        return stroke.copy(points = clean)
+    }
+
+    return stroke
+}
+
 /** Removes only the touched portions and returns the remaining stroke fragments. */
 fun splitStrokeByCircle(stroke: InkStroke, center: Offset, radius: Float): List<InkStroke> {
     if (stroke.points.size < 2) return if (strokeIntersectsCircle(stroke, center, radius)) emptyList() else listOf(stroke)
@@ -71,7 +154,7 @@ fun splitStrokeByCircle(stroke: InkStroke, center: Offset, radius: Float): List<
     return result
 }
 
-private fun distanceToSegment(point: Offset, start: Offset, end: Offset): Float {
+internal fun distanceToSegment(point: Offset, start: Offset, end: Offset): Float {
     val segment = end - start
     val lengthSquared = segment.x * segment.x + segment.y * segment.y
     if (lengthSquared <= 0.0001f) return (point - start).getDistance()

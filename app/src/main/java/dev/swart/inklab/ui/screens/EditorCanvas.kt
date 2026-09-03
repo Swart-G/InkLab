@@ -2,6 +2,7 @@ package dev.swart.inklab.ui.screens
 
 import android.graphics.Paint
 import android.graphics.Typeface
+import android.view.MotionEvent
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.awaitEachGesture
@@ -23,21 +24,24 @@ import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.input.pointer.PointerEventPass
+import androidx.compose.ui.input.pointer.PointerEvent
 import androidx.compose.ui.input.pointer.PointerType
 import androidx.compose.ui.input.pointer.isSecondaryPressed
 import androidx.compose.ui.input.pointer.isTertiaryPressed
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChanged
+import androidx.compose.ui.input.pointer.nativeEvent
 import dev.swart.inklab.core.model.ConvertedInkKind
 import dev.swart.inklab.core.model.InkPoint
 import dev.swart.inklab.core.model.PaperPattern
-import dev.swart.inklab.core.storage.FingerAction
 import dev.swart.inklab.ui.CanvasInputSource
 import dev.swart.inklab.ui.EditorTool
 import dev.swart.inklab.ui.EditorViewModel
 import dev.swart.inklab.ui.theme.InkColors
 import ru.noties.jlatexmath.JLatexMathDrawable
 import kotlin.math.floor
+import kotlin.math.abs
+import kotlin.math.min
 
 @Composable
 fun EditorCanvas(vm: EditorViewModel, modifier: Modifier = Modifier) {
@@ -54,7 +58,7 @@ fun EditorCanvas(vm: EditorViewModel, modifier: Modifier = Modifier) {
     Canvas(
         modifier = modifier
             .background(paperColor)
-            .pointerInput(vm.tool, vm.inputPreferences, vm.viewportScale, vm.convertedObjects.size) {
+            .pointerInput(vm.tool, vm.inputPreferences) {
                 awaitEachGesture {
                     val firstEvent = awaitPointerEvent(PointerEventPass.Initial)
                     val down = firstEvent.changes.firstOrNull { it.pressed } ?: return@awaitEachGesture
@@ -74,21 +78,45 @@ fun EditorCanvas(vm: EditorViewModel, modifier: Modifier = Modifier) {
                         return@awaitEachGesture
                     }
 
-                    if (source == CanvasInputSource.TOUCH && vm.inputPreferences.fingerAction == FingerAction.PAN) {
+                    if (source == CanvasInputSource.TOUCH) {
+                        val startedAt = System.currentTimeMillis()
+                        val startPosition = down.position
                         var event = firstEvent
+                        var usedTwoFingers = false
+                        var transformed = false
+                        var oneFingerDrag = false
                         while (event.changes.any { it.pressed }) {
+                            val pressed = event.changes.filter { it.pressed }
                             val centroid = event.calculateCentroid(useCurrent = true)
                             val zoom = event.calculateZoom()
-                            if (zoom.isFinite() && zoom != 1f) vm.zoomBy(zoom, centroid)
                             val pan = event.calculatePan()
-                            if (pan != Offset.Zero) vm.panBy(pan)
+                            if (pressed.size >= 2) {
+                                usedTwoFingers = true
+                                if (zoom.isFinite() && abs(zoom - 1f) > 0.002f) {
+                                    vm.zoomBy(zoom, centroid)
+                                    if (abs(zoom - 1f) > 0.015f) transformed = true
+                                }
+                                if (pan.getDistance() > 0.7f) {
+                                    vm.panBy(pan)
+                                    if (pan.getDistance() > viewConfiguration.touchSlop / 2f) transformed = true
+                                }
+                            } else if (!usedTwoFingers && pressed.isNotEmpty()) {
+                                val distance = (pressed.first().position - startPosition).getDistance()
+                                if (distance > viewConfiguration.touchSlop) oneFingerDrag = true
+                                if (oneFingerDrag && pan != Offset.Zero) vm.panBy(pan)
+                            }
                             event.changes.forEach { if (it.positionChanged()) it.consume() }
                             event = awaitPointerEvent(PointerEventPass.Initial)
+                        }
+                        val shortTap = System.currentTimeMillis() - startedAt < 420L
+                        when {
+                            usedTwoFingers && !transformed && shortTap -> vm.undo()
+                            !usedTwoFingers && !oneFingerDrag && shortTap -> vm.selectObjectAt(vm.screenToCanvas(startPosition))
                         }
                         return@awaitEachGesture
                     }
 
-                    val sideButton = firstEvent.buttons.isSecondaryPressed || firstEvent.buttons.isTertiaryPressed
+                    val sideButton = firstEvent.hasStylusButton()
                     val activeTool = vm.effectiveTool(source, sideButton)
                     if (activeTool == null) {
                         while (true) {
@@ -238,13 +266,18 @@ fun EditorCanvas(vm: EditorViewModel, modifier: Modifier = Modifier) {
                     }
                     if (drawable != null) {
                         drawIntoCanvas { canvas ->
-                            drawable.setBounds(
-                                item.x.toInt(),
-                                item.y.toInt(),
-                                (item.x + item.width).toInt(),
-                                (item.y + item.height).toInt()
-                            )
-                            drawable.draw(canvas.nativeCanvas)
+                            val intrinsicWidth = drawable.intrinsicWidth.coerceAtLeast(1)
+                            val intrinsicHeight = drawable.intrinsicHeight.coerceAtLeast(1)
+                            val fit = min(item.width / intrinsicWidth, item.height / intrinsicHeight).coerceAtMost(1f)
+                            val dx = item.x
+                            val dy = item.y + (item.height - intrinsicHeight * fit) / 2f
+                            val native = canvas.nativeCanvas
+                            val save = native.save()
+                            native.translate(dx, dy)
+                            native.scale(fit, fit)
+                            drawable.setBounds(0, 0, intrinsicWidth, intrinsicHeight)
+                            drawable.draw(native)
+                            native.restoreToCount(save)
                         }
                     } else {
                         drawIntoCanvas { canvas ->
@@ -299,6 +332,13 @@ fun EditorCanvas(vm: EditorViewModel, modifier: Modifier = Modifier) {
             }
         }
     }
+}
+
+private fun PointerEvent.hasStylusButton(): Boolean {
+    val nativeButtons = nativeEvent.buttonState
+    return buttons.isSecondaryPressed || buttons.isTertiaryPressed ||
+        nativeButtons and MotionEvent.BUTTON_STYLUS_PRIMARY != 0 ||
+        nativeButtons and MotionEvent.BUTTON_STYLUS_SECONDARY != 0
 }
 
 private fun androidx.compose.ui.input.pointer.PointerInputChange.toInkPoint(
