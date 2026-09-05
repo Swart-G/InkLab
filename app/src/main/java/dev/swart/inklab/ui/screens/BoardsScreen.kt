@@ -1,6 +1,8 @@
 package dev.swart.inklab.ui.screens
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -69,9 +71,15 @@ fun BoardsScreen(vm: EditorViewModel, onBack: () -> Unit) {
     var creatingFormat by remember { mutableStateOf<DocumentFormat?>(null) }
     var creatingFolder by remember { mutableStateOf(false) }
 
+    var query by rememberSaveable { mutableStateOf("") }
+    var favoritesOnly by rememberSaveable { mutableStateOf(false) }
+    var sortByName by rememberSaveable { mutableStateOf(false) }
     val currentFolder = currentFolderId?.let { id -> vm.folders.firstOrNull { it.id == id } }
-    val visibleFolders = vm.folders.filter { it.parentId == currentFolderId }.sortedByDescending { it.updatedAt }
-    val visibleBoards = vm.boards.filter { it.folderId == currentFolderId }.sortedByDescending { it.updatedAt }
+    val visibleFolders = vm.folders.filter { it.parentId == currentFolderId && query.isBlank() && !favoritesOnly }.sortedByDescending { it.updatedAt }
+    val visibleBoards = vm.boards.filter {
+        it.deletedAt == null && (query.isNotBlank() || it.folderId == currentFolderId) && (!favoritesOnly || it.favorite) &&
+            (query.isBlank() || it.title.contains(query,true) || it.subject.contains(query,true) || it.pages.any { page -> page.convertedObjects.any { item -> item.content.contains(query,true) } })
+    }.let { if(sortByName) it.sortedBy { it.title.lowercase() } else it.sortedByDescending { it.updatedAt } }
     val breadcrumb = generateSequence(currentFolder) { folder ->
         folder.parentId?.let { parentId -> vm.folders.firstOrNull { it.id == parentId } }
     }.toList().asReversed().joinToString(" / ") { it.title }
@@ -98,7 +106,14 @@ fun BoardsScreen(vm: EditorViewModel, onBack: () -> Unit) {
                     if (breadcrumb.isNotEmpty()) Text(breadcrumb, color = InkColors.Muted, style = MaterialTheme.typography.bodySmall)
                 }
             }
-            Spacer(Modifier.height(22.dp))
+            OutlinedTextField(query,{query=it},label={Text("Поиск по названиям и распознанному тексту")},singleLine=true,modifier=Modifier.fillMaxWidth())
+            Row(Modifier.horizontalScroll(rememberScrollState())) {
+                TextButton(onClick={favoritesOnly=!favoritesOnly}) {Text(if(favoritesOnly) "★ Избранное" else "☆ Избранное")}
+                TextButton(onClick={sortByName=!sortByName}) {Text(if(sortByName) "По имени" else "По изменению")}
+                TextButton(onClick={vm.libraryTools=true}) {Text("Копии и корзина")}
+                TextButton(onClick={vm.navigate(dev.swart.inklab.ui.AppScreen.SETTINGS)}) {Text("Настройки")}
+            }
+            Spacer(Modifier.height(12.dp))
 
             if (visibleFolders.isEmpty() && visibleBoards.isEmpty()) {
                 Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center) {
@@ -106,7 +121,7 @@ fun BoardsScreen(vm: EditorViewModel, onBack: () -> Unit) {
                         Icon(Icons.Outlined.Folder, null, tint = InkColors.Accent, modifier = Modifier.padding(22.dp).size(40.dp))
                     }
                     Spacer(Modifier.height(16.dp))
-                    Text(if (currentFolder == null) "Здесь появятся ваши доски, тетради и папки" else "Папка пока пустая", color = InkColors.Muted)
+                    Text(if(query.isNotBlank() || favoritesOnly) "Ничего не найдено" else if (currentFolder == null) "Здесь появятся ваши доски, тетради и папки" else "Папка пока пустая", color = InkColors.Muted)
                     TextButton(onClick = { createMenu = true }) { Text("Создать") }
                 }
             } else {
@@ -129,7 +144,10 @@ fun BoardsScreen(vm: EditorViewModel, onBack: () -> Unit) {
                         BoardCard(
                             board = board,
                             active = board.id == vm.currentBoardId,
-                            onOpen = { vm.openBoard(board.id) },
+                            onOpen = {
+                                vm.openBoard(board.id)
+                                if(query.isNotBlank()) board.pages.indexOfFirst { page -> page.convertedObjects.any { it.content.contains(query,true) } }.takeIf {it>=0}?.let(vm::openPage)
+                            },
                             onRename = { vm.renameBoard(board.id, it) },
                             onDelete = { vm.deleteBoard(board.id) }
                         )
@@ -206,16 +224,12 @@ private fun BoardCard(
                 shape = RoundedCornerShape(18.dp),
                 color = Color(board.settings.paperColor)
             ) {
-                Box(Modifier.padding(16.dp)) {
-                    Icon(if (board.format == DocumentFormat.NOTEBOOK) Icons.Outlined.NoteAlt else Icons.Outlined.Draw, null, tint = InkColors.Accent.copy(alpha = 0.55f), modifier = Modifier.size(32.dp))
-                    Text(
-                        if (board.format == DocumentFormat.NOTEBOOK) "${board.pages.size} стр. · $strokeCount штр." else "$strokeCount штрихов",
-                        modifier = Modifier.align(Alignment.BottomStart),
-                        style = MaterialTheme.typography.labelMedium,
-                        color = InkColors.Muted
-                    )
+                Box(Modifier.padding(8.dp), contentAlignment = Alignment.Center) {
+                    board.pages.firstOrNull()?.let { PageThumbnail(it, board.settings, Modifier.fillMaxSize()) }
                 }
             }
+            Text("${board.pages.size} стр. · $strokeCount штрихов", style = MaterialTheme.typography.bodySmall, color = InkColors.Muted)
+
             Spacer(Modifier.height(14.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {

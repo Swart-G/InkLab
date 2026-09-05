@@ -56,7 +56,11 @@ data class BoardSettings(
 data class InkPage(
     val id: String = UUID.randomUUID().toString(),
     val strokes: List<InkStroke> = emptyList(),
-    val convertedObjects: List<ConvertedInkObject> = emptyList()
+    val convertedObjects: List<ConvertedInkObject> = emptyList(),
+    val width: Float = 1000f,
+    val height: Float = 1414f,
+    val originX: Float = 0f,
+    val originY: Float = 0f
 )
 
 data class InkFolder(
@@ -78,5 +82,12 @@ data class InkBoard(
     val settings: BoardSettings = BoardSettings(),
     val pages: List<InkPage> = listOf(InkPage()),
     val lastPageIndex: Int = 0,
-    val folderId: String? = null
+    val folderId: String? = null,
+    val languageTag: String = "ru-RU",
+    val favorite: Boolean = false,
+    val deletedAt: Long? = null,
+    val trashedPages: List<InkPage> = emptyList(),
+    val savedScale: Float = 0f,
+    val savedOffsetX: Float = 0f,
+    val savedOffsetY: Float = 0f
 )

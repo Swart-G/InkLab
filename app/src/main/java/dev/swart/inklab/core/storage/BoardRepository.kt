@@ -20,13 +20,53 @@ import java.io.File
 import java.util.UUID
 
 class BoardRepository(context: Context) {
+    private val savedDocuments = mutableMapOf<String, InkBoard>()
+    private val directory = File(context.filesDir, "documents")
+    private val migrationBackup = File(context.filesDir, "migration-v1")
+    var loadError: String? = null
+        private set
+
+    fun encode(boards: List<InkBoard>): String = JSONArray().apply { boards.forEach { put(it.toJson()) } }.toString()
+    fun decode(value: String): List<InkBoard> = JSONArray(value).let { root ->
+        List(root.length()) { root.getJSONObject(it).toBoard() }
+    }
+
     private val file = File(context.filesDir, "boards.json")
     private val backupFile = File(context.filesDir, "boards.json.bak")
     private val foldersFile = File(context.filesDir, "folders.json")
     private val foldersBackupFile = File(context.filesDir, "folders.json.bak")
 
-    fun load(): List<InkBoard> = loadArray(file, backupFile) { root ->
-        List(root.length()) { index -> root.getJSONObject(index).toBoard() }
+    fun allowRecovery() {
+        if (loadError != null) {
+            val recovery = File(directory.parentFile, "recovery-${System.currentTimeMillis()}").apply { mkdirs() }
+            if (directory.exists()) directory.copyRecursively(File(recovery, "documents"))
+            listOf(file, backupFile, foldersFile, foldersBackupFile).filter { it.exists() }.forEach { it.copyTo(File(recovery,it.name)) }
+            loadError = null
+        }
+    }
+
+    fun load(): List<InkBoard> {
+        if (directory.isDirectory && (File(directory, "index.json").exists() || File(directory, "index.json.bak").exists())) {
+            return loadArray(File(directory, "index.json"), File(directory, "index.json.bak")) { index ->
+                List(index.length()) { i ->
+                    val name = index.getString(i)
+                    require(name.matches(Regex("[a-zA-Z0-9-]+")))
+                    val target = File(directory, "$name.json")
+                    runCatching { JSONObject(target.readText()).toBoard() }.getOrElse {
+                        JSONObject(File(directory, "$name.json.bak").readText()).toBoard()
+                    }
+                }
+            }
+        }
+        val old = loadArray(file, backupFile) { root -> List(root.length()) { root.getJSONObject(it).toBoard() } }
+        if (file.exists() && loadError == null) {
+            migrationBackup.mkdirs()
+            listOf(file, backupFile, foldersFile, foldersBackupFile).filter { it.exists() }.forEach {
+                val destination = File(migrationBackup, it.name)
+                if (!destination.exists()) it.copyTo(destination)
+            }
+        }
+        return old
     }
 
     fun loadFolders(): List<InkFolder> = loadArray(foldersFile, foldersBackupFile) { root ->
@@ -48,14 +88,27 @@ class BoardRepository(context: Context) {
             val parsed = runCatching { parser(JSONArray(candidate.readText())) }.getOrNull()
             if (parsed != null) return parsed
         }
+        if (primary.exists() || backup.exists()) loadError = "Не удалось прочитать ${primary.name}. Исходные файлы сохранены. Восстановите резервную копию."
         return emptyList()
     }
 
     @Synchronized
     fun save(boards: List<InkBoard>) {
-        val root = JSONArray()
-        boards.forEach { root.put(it.toJson()) }
-        writeAtomic(file, root.toString())
+        check(loadError == null) { loadError.orEmpty() }
+        directory.mkdirs()
+        boards.forEach { board ->
+            if (savedDocuments[board.id] === board) return@forEach
+            require(board.id.matches(Regex("[a-zA-Z0-9-]+")))
+            val target = File(directory, "${board.id}.json")
+            val content = board.toJson().toString()
+            if (!target.exists() || target.readText() != content) writeAtomic(target, content)
+            savedDocuments[board.id] = board
+        }
+        writeAtomic(File(directory, "index.json"), JSONArray(boards.map { it.id }).toString())
+        val retained = boards.map {it.id}.toSet()
+        directory.listFiles()?.filter { it.extension == "json" && it.name != "index.json" && it.nameWithoutExtension !in retained }?.forEach {
+            it.delete(); File(directory,"${it.name}.bak").delete(); savedDocuments.remove(it.nameWithoutExtension)
+        }
     }
 
     @Synchronized
@@ -75,17 +128,26 @@ class BoardRepository(context: Context) {
 
     private fun writeAtomic(target: File, content: String) {
         target.parentFile?.mkdirs()
-        val temporary = File(target.parentFile, "${target.name}.tmp")
-        temporary.writeText(content)
-        if (!temporary.renameTo(target)) {
-            temporary.copyTo(target, overwrite = true)
-            check(temporary.delete() || !temporary.exists()) { "Could not remove temporary ${temporary.name}" }
+        val atomic = android.util.AtomicFile(target)
+        val output = atomic.startWrite()
+        try {
+            output.write(content.toByteArray(Charsets.UTF_8))
+            atomic.finishWrite(output)
+        } catch (error: Throwable) {
+            atomic.failWrite(output)
+            throw error
         }
-        val backup = File(target.parentFile, "${target.name}.bak")
-        runCatching { target.copyTo(backup, overwrite = true) }
+        target.copyTo(File(target.parentFile, "${target.name}.bak"), overwrite = true)
     }
 
     private fun InkBoard.toJson() = JSONObject().apply {
+        put("schemaVersion", 2)
+        put("languageTag", languageTag)
+        put("favorite", favorite)
+        put("deletedAt", deletedAt ?: JSONObject.NULL)
+        put("savedScale", savedScale.toDouble())
+        put("savedOffsetX", savedOffsetX.toDouble())
+        put("savedOffsetY", savedOffsetY.toDouble())
         put("id", id)
         put("title", title)
         put("subject", subject)
@@ -101,15 +163,18 @@ class BoardRepository(context: Context) {
             put("paperColor", settings.paperColor)
             put("showMargin", settings.showMargin)
         })
-        put("pages", JSONArray().apply {
-            pages.forEach { page ->
-                put(JSONObject().apply {
-                    put("id", page.id)
-                    put("strokes", JSONArray().apply { page.strokes.forEach { put(it.toJson()) } })
-                    put("convertedObjects", page.convertedObjects.toJson())
-                })
-            }
-        })
+        put("pages", pagesJson(pages))
+        put("trashedPages", pagesJson(trashedPages))
+    }
+
+    private fun pagesJson(pages: List<InkPage>) = JSONArray().apply {
+        pages.forEach { page -> put(JSONObject().apply {
+            put("id", page.id)
+            put("width", page.width.toDouble()); put("height", page.height.toDouble())
+            put("originX", page.originX.toDouble()); put("originY", page.originY.toDouble())
+            put("strokes", JSONArray().apply { page.strokes.forEach { put(it.toJson()) } })
+            put("convertedObjects", page.convertedObjects.toJson())
+        }) }
     }
 
     private fun List<ConvertedInkObject>.toJson() = JSONArray().apply {
@@ -195,25 +260,37 @@ class BoardRepository(context: Context) {
             )
         }
 
+        fun parsePage(page: JSONObject): InkPage {
+            val strokesJson = page.optJSONArray("strokes") ?: JSONArray()
+            val strokes = List(strokesJson.length()) { strokesJson.getJSONObject(it).toStroke() }
+            val objects = parseConverted(page.optJSONArray("convertedObjects") ?: JSONArray())
+            val points = (strokes + objects.flatMap { it.sourceStrokes }).flatMap { it.points }
+            val left = minOf(0f, points.minOfOrNull { it.x } ?: 0f, objects.minOfOrNull { it.x } ?: 0f)
+            val top = minOf(0f, points.minOfOrNull { it.y } ?: 0f, objects.minOfOrNull { it.y } ?: 0f)
+            val right = maxOf(950f, points.maxOfOrNull { it.x + 20f } ?: 0f, objects.maxOfOrNull { it.x + it.width } ?: 0f)
+            val bottom = maxOf(0f, points.maxOfOrNull { it.y + 20f } ?: 0f, objects.maxOfOrNull { it.y + it.height } ?: 0f)
+            val ratio = if (optString("orientation") == "LANDSCAPE") 1.414f else 1f / 1.414f
+            val width = maxOf((right - left) * 1.05f, (bottom - top) * 1.05f * ratio)
+            return InkPage(
+                id = page.optString("id", UUID.randomUUID().toString()), strokes = strokes, convertedObjects = objects,
+                width = page.optDouble("width", width.toDouble()).toFloat().coerceAtLeast(1f),
+                height = page.optDouble("height", (width / ratio).toDouble()).toFloat().coerceAtLeast(1f),
+                originX = page.optDouble("originX", (left - (right-left)*0.025f).toDouble()).toFloat(),
+                originY = page.optDouble("originY", (top - (bottom-top)*0.025f).toDouble()).toFloat()
+            )
+        }
         val pagesJson = optJSONArray("pages")
         val pages = if (pagesJson != null && pagesJson.length() > 0) {
-            List(pagesJson.length()) { pageIndex ->
-                val page = pagesJson.getJSONObject(pageIndex)
-                val strokesJson = page.optJSONArray("strokes") ?: JSONArray()
-                InkPage(
-                    id = page.optString("id", UUID.randomUUID().toString()),
-                    strokes = List(strokesJson.length()) { strokesJson.getJSONObject(it).toStroke() },
-                    convertedObjects = parseConverted(page.optJSONArray("convertedObjects") ?: JSONArray())
-                )
+            List(pagesJson.length()) { parsePage(pagesJson.getJSONObject(it)) }
+        } else listOf(parsePage(this))
+        (pages + (optJSONArray("trashedPages")?.let { arr -> List(arr.length()) { parsePage(arr.getJSONObject(it)) } } ?: emptyList())).forEach { page ->
+            require(page.width.isFinite() && page.height.isFinite() && page.width in 1f..1000000f && page.height in 1f..1000000f)
+            require(page.originX.isFinite() && page.originY.isFinite())
+            (page.strokes + page.convertedObjects.flatMap { it.sourceStrokes }).forEach { stroke ->
+                require(stroke.width.isFinite() && stroke.width > 0f)
+                require(stroke.points.all { it.x.isFinite() && it.y.isFinite() && it.pressure.isFinite() })
             }
-        } else {
-            val strokesJson = optJSONArray("strokes") ?: JSONArray()
-            listOf(
-                InkPage(
-                    strokes = List(strokesJson.length()) { strokesJson.getJSONObject(it).toStroke() },
-                    convertedObjects = parseConverted(optJSONArray("convertedObjects") ?: JSONArray())
-                )
-            )
+            page.convertedObjects.forEach { require(listOf(it.x,it.y,it.width,it.height,it.textSize).all(Float::isFinite) && it.width > 0 && it.height > 0 && it.textSize > 0) }
         }
 
         return InkBoard(
@@ -229,7 +306,14 @@ class BoardRepository(context: Context) {
             settings = settings,
             pages = pages,
             lastPageIndex = optInt("lastPageIndex", 0).coerceIn(0, pages.lastIndex),
-            folderId = optString("folderId", "").takeIf { it.isNotBlank() }
+            languageTag = optString("languageTag", "ru-RU"),
+            favorite = optBoolean("favorite", false),
+            deletedAt = if (isNull("deletedAt")) null else optLong("deletedAt"),
+            trashedPages = optJSONArray("trashedPages")?.let { arr -> List(arr.length()) { parsePage(arr.getJSONObject(it)) } } ?: emptyList(),
+            savedScale = optDouble("savedScale", 0.0).toFloat(),
+            savedOffsetX = optDouble("savedOffsetX", 0.0).toFloat(),
+            savedOffsetY = optDouble("savedOffsetY", 0.0).toFloat(),
+            folderId = optString("folderId", "").takeIf { it.isNotBlank() && it != "null" }
         )
     }
 }
@@ -255,7 +339,11 @@ data class InputPreferences(
     val autoShapes: Boolean = true,
     val penColor: Int = 0xFF25272C.toInt(),
     val quickPenColors: List<Int> = defaultQuickPenColors,
-    val darkTheme: Boolean = false
+    val darkTheme: Boolean = false,
+    val systemTheme: Boolean = false,
+    val nightPaper: Boolean = true,
+    val twoFingerUndo: Boolean = true,
+    val wifiOnlyModels: Boolean = true
 )
 
 class InputPreferencesRepository(context: Context) {
@@ -275,7 +363,11 @@ class InputPreferencesRepository(context: Context) {
             ?.mapNotNull { token -> token.toLongOrNull(16)?.toInt() }
             ?.takeIf { it.size == 4 }
             ?: defaultQuickPenColors,
-        darkTheme = preferences.getBoolean("darkTheme", false)
+        darkTheme = preferences.getBoolean("darkTheme", false),
+        systemTheme = preferences.getBoolean("systemTheme", false),
+        nightPaper = preferences.getBoolean("nightPaper", true),
+        twoFingerUndo = preferences.getBoolean("twoFingerUndo", true),
+        wifiOnlyModels = preferences.getBoolean("wifiOnlyModels", true)
     )
 
     fun save(value: InputPreferences) {
@@ -289,6 +381,10 @@ class InputPreferencesRepository(context: Context) {
             .putBoolean("autoShapes", value.autoShapes)
             .putInt("penColor", value.penColor)
             .putString("quickPenColors", value.quickPenColors.joinToString(",") { Integer.toUnsignedString(it, 16) })
+            .putBoolean("systemTheme", value.systemTheme)
+            .putBoolean("nightPaper", value.nightPaper)
+            .putBoolean("twoFingerUndo", value.twoFingerUndo)
+            .putBoolean("wifiOnlyModels", value.wifiOnlyModels)
             .putBoolean("darkTheme", value.darkTheme)
             .apply()
     }

@@ -46,5 +46,10 @@ class RecognitionRegistry(private val providers: List<RecognitionProvider>) {
             RecognitionMode.MATH -> it.capabilities.math
         }
     }
-    fun get(id: String) = providers.firstOrNull { it.id == id }
+    private val languages = mutableMapOf<String, dev.swart.inklab.recognition.mlkit.MlKitDigitalInkProvider>()
+    fun language(tag: String): dev.swart.inklab.recognition.mlkit.MlKitDigitalInkProvider {
+        val canonical = com.google.mlkit.vision.digitalink.recognition.DigitalInkRecognitionModelIdentifier.fromLanguageTag(tag)?.languageTag ?: tag
+        return languages.getOrPut(canonical) { dev.swart.inklab.recognition.mlkit.MlKitDigitalInkProvider(canonical) }
+    }
+    fun get(id: String): RecognitionProvider? = if (id.startsWith("mlkit-")) language(if (id == "mlkit-ru") "ru-RU" else id.removePrefix("mlkit-")) else providers.firstOrNull { it.id == id }
 }

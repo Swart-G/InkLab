@@ -55,12 +55,15 @@ data class UiRecognition(
     val loading: Boolean = false,
     val result: RecognitionResult? = null,
     val error: String? = null,
-    val sourceIds: Set<String> = emptySet()
+    val sourceIds: Set<String> = emptySet(),
+    val documentId: String = "",
+    val pageId: String = "",
+    val originalStrokes: List<InkStroke> = emptyList()
 )
 
 private data class DocumentSnapshot(
-    val strokes: List<InkStroke>,
-    val convertedObjects: List<ConvertedInkObject>
+    val board: InkBoard,
+    val pageIndex: Int
 )
 
 class EditorViewModel(application: Application) : AndroidViewModel(application) {
@@ -73,6 +76,22 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     val strokes = mutableStateListOf<InkStroke>()
     val convertedObjects = mutableStateListOf<ConvertedInkObject>()
     val modelProgress = mutableStateMapOf<String, Float>()
+    var saving by mutableStateOf(false)
+    private val modelRequests = mutableMapOf<String, Int>()
+    var storageError by mutableStateOf<String?>(null)
+    var fullScreen by mutableStateOf(false)
+    var pageManager by mutableStateOf(false)
+    var pagePanel by mutableStateOf(false)
+    var libraryTools by mutableStateOf(false)
+    var audioPanel by mutableStateOf(false)
+    var languagePanel by mutableStateOf(false)
+    var viewportWidth = 1f
+    var viewportHeight = 1f
+    var lastStylusTime = -10000L
+    var stylusHover = false
+    private val saves = kotlinx.coroutines.channels.Channel<Pair<List<InkBoard>, List<InkFolder>>>(kotlinx.coroutines.channels.Channel.CONFLATED)
+    private var inputSnapshot: DocumentSnapshot? = null
+    private var inputUndoCount = 0
     val modelErrors = mutableStateMapOf<String, String>()
 
     var screen by mutableStateOf(AppScreen.EDITOR)
@@ -129,8 +148,20 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     init {
         folders += boardRepository.loadFolders()
         val loaded = boardRepository.load()
-        boards += if (loaded.isEmpty()) listOf(InkBoard(title = "Новая доска")) else loaded
-        openBoard(boards.first().id, persistPrevious = false)
+        storageError = boardRepository.loadError
+        boards += if (loaded.isEmpty() && storageError == null) listOf(InkBoard(title = "Новая тетрадь", format = DocumentFormat.NOTEBOOK)) else loaded
+        boards.firstOrNull { it.deletedAt == null }?.let { openBoard(it.id, persistPrevious = false) }
+            ?: run { screen = AppScreen.BOARDS }
+        viewModelScope.launch {
+            for ((documents, directories) in saves) {
+                val result = kotlinx.coroutines.withContext(Dispatchers.IO) {
+                    runCatching { boardRepository.save(documents); boardRepository.saveFolders(directories) }
+                }
+                storageError = result.exceptionOrNull()?.let { "Не удалось сохранить: ${it.message}" }
+                saving = false
+            }
+        }
+        if (loaded.isEmpty() && storageError == null) scheduleSave()
     }
 
     fun navigate(destination: AppScreen) {
@@ -151,6 +182,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             format = format,
             orientation = orientation,
             settings = settings,
+            pages = listOf(newPage(orientation)),
             folderId = folderId
         )
         boards.add(0, board)
@@ -195,8 +227,9 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             return
         }
         if (persistPrevious) persistCurrentBoard()
-        val board = boards.firstOrNull { it.id == id } ?: return
+        val board = boards.firstOrNull { it.id == id && it.deletedAt == null } ?: return
         currentBoardId = board.id
+        textProviderId = "mlkit-${board.languageTag}"
         currentPageIndex = board.lastPageIndex.coerceIn(0, board.pages.lastIndex)
         val page = board.pages[currentPageIndex]
         strokes.clear()
@@ -206,15 +239,20 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         clearSelection()
         undo.clear()
         redo.clear()
-        resetViewport()
+        if (board.savedScale > 0) {
+            viewportScale = board.savedScale
+            viewportOffset = Offset(board.savedOffsetX, board.savedOffsetY)
+            constrainViewport()
+        } else resetViewport()
         screen = AppScreen.EDITOR
     }
 
     fun deleteBoard(id: String) {
         val wasCurrent = id == currentBoardId
-        boards.removeAll { it.id == id }
+        val index = boards.indexOfFirst { it.id == id }
+        if (index >= 0) boards[index] = boards[index].copy(deletedAt = System.currentTimeMillis())
         if (wasCurrent) {
-            val next = boards.firstOrNull()
+            val next = boards.firstOrNull { it.deletedAt == null }
             if (next != null) openBoard(next.id, persistPrevious = false) else {
                 currentBoardId = ""
                 currentPageIndex = 0
@@ -254,34 +292,102 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         scheduleSave()
     }
 
-    fun addPage() {
-        val boardIndex = boards.indexOfFirst { it.id == currentBoardId }
-        if (boardIndex < 0 || boards[boardIndex].format != DocumentFormat.NOTEBOOK) return
-        persistCurrentBoard()
-        val board = boards[boardIndex]
-        val nextPages = board.pages + InkPage()
-        boards[boardIndex] = board.copy(pages = nextPages, lastPageIndex = nextPages.lastIndex, updatedAt = System.currentTimeMillis())
-        loadPage(nextPages.lastIndex)
-    }
+    private fun newPage(orientation: PageOrientation = currentBoard?.orientation ?: PageOrientation.PORTRAIT) =
+        if (orientation == PageOrientation.PORTRAIT) InkPage() else InkPage(width = 1414f, height = 1000f)
 
-    fun openPage(index: Int) {
+    fun addPage() = editPages { pages -> pages.add(currentPageIndex + 1, newPage()); currentPageIndex + 1 }
+    fun duplicatePage() = editPages { pages ->
+        val page = pages[currentPageIndex]
+        pages.add(currentPageIndex + 1, page.copy(id = UUID.randomUUID().toString()))
+        currentPageIndex + 1
+    }
+    fun movePage(delta: Int) = movePageTo((currentPageIndex + delta).coerceIn(0, (currentBoard?.pages?.lastIndex ?: 0)))
+    fun movePageTo(target: Int) = editPages { pages ->
+        val destination = target.coerceIn(0, pages.lastIndex)
+        pages.add(destination, pages.removeAt(currentPageIndex)); destination
+    }
+    private fun editPages(edit: (MutableList<InkPage>) -> Int) {
         val board = currentBoard ?: return
-        if (index !in board.pages.indices || index == currentPageIndex) return
+        if (board.format != DocumentFormat.NOTEBOOK) return
+        pushUndo()
+        val pages = currentDocument().pages.toMutableList()
+        val next = edit(pages)
+        replaceBoard(currentDocument().copy(pages = pages, lastPageIndex = next))
+        loadPage(next)
+        scrollToPage(next)
+    }
+    fun openPage(index: Int) {
+        if (index !in (currentBoard?.pages?.indices ?: return)) return
+        activatePage(index)
+        scrollToPage(index)
+    }
+    fun activatePage(index: Int) {
+        if (index == currentPageIndex) return
         persistCurrentBoard()
         loadPage(index)
     }
-
     fun deleteCurrentPage() {
-        val boardIndex = boards.indexOfFirst { it.id == currentBoardId }
-        if (boardIndex < 0) return
-        persistCurrentBoard()
-        val board = boards[boardIndex]
-        if (board.format != DocumentFormat.NOTEBOOK || board.pages.size <= 1) return
-        val pages = board.pages.toMutableList().also { it.removeAt(currentPageIndex) }
-        val nextIndex = currentPageIndex.coerceAtMost(pages.lastIndex)
-        boards[boardIndex] = board.copy(pages = pages, lastPageIndex = nextIndex, updatedAt = System.currentTimeMillis())
-        loadPage(nextIndex)
+        val page = currentBoard?.pages?.getOrNull(currentPageIndex) ?: return
+        editPages { pages ->
+            replaceBoard(currentDocument().copy(trashedPages = currentDocument().trashedPages + page))
+            pages.removeAt(currentPageIndex)
+            if (pages.isEmpty()) pages.add(newPage())
+            currentPageIndex.coerceAtMost(pages.lastIndex)
+        }
     }
+    fun restorePage(pageId: String) {
+        val board = currentBoard ?: return
+        val page = board.trashedPages.firstOrNull { it.id == pageId } ?: return
+        pushUndo()
+        replaceBoard(currentDocument().copy(pages = currentDocument().pages + page, trashedPages = board.trashedPages.filterNot { it.id == pageId }))
+        scheduleSave()
+    }
+    fun replaceBoard(board: InkBoard) {
+        val index = boards.indexOfFirst { it.id == board.id }
+        if (index >= 0) boards[index] = board
+    }
+    fun setLanguage(tag: String) {
+        currentBoard?.let { replaceBoard(it.copy(languageTag = tag)) }
+        textProviderId = "mlkit-$tag"
+        scheduleSave()
+    }
+    fun toggleFavorite(id: String) {
+        boards.firstOrNull { it.id == id }?.let { replaceBoard(it.copy(favorite = !it.favorite)) }; scheduleSave()
+    }
+    fun moveDocument(id: String, folderId: String?) {
+        boards.firstOrNull { it.id == id }?.let { replaceBoard(it.copy(folderId = folderId)) }; scheduleSave()
+    }
+    fun restoreDocument(id: String) {
+        boards.firstOrNull { it.id == id }?.let { replaceBoard(it.copy(deletedAt = null)) }; scheduleSave()
+    }
+    fun permanentlyDelete(id: String) { boards.removeAll { it.id == id && it.deletedAt != null }; scheduleSave() }
+    fun permanentlyDeletePage(id: String) { currentBoard?.let {replaceBoard(it.copy(trashedPages=it.trashedPages.filterNot {page->page.id==id}))};scheduleSave() }
+    fun emptyTrash() {
+        boards.removeAll {it.deletedAt!=null}
+        for(index in boards.indices) boards[index]=boards[index].copy(trashedPages=emptyList())
+        scheduleSave()
+    }
+    fun importDocuments(documents: List<InkBoard>) {
+        boardRepository.allowRecovery()
+        storageError = null
+        boards.addAll(documents); scheduleSave()
+    }
+    fun restorePreferences(json: org.json.JSONObject?) {
+        if (json == null) return
+        val prefs = inputPreferences
+        updateInputPreferences(prefs.copy(
+            darkTheme = json.optBoolean("darkTheme", prefs.darkTheme), systemTheme = json.optBoolean("systemTheme", prefs.systemTheme),
+            nightPaper = json.optBoolean("nightPaper", prefs.nightPaper), twoFingerUndo = json.optBoolean("twoFingerUndo", prefs.twoFingerUndo),
+            wifiOnlyModels = json.optBoolean("wifiOnlyModels", prefs.wifiOnlyModels), palmRejection = json.optBoolean("palmRejection", prefs.palmRejection),
+            pressureEnabled = json.optBoolean("pressureEnabled", prefs.pressureEnabled), autoShapes = json.optBoolean("autoShapes", prefs.autoShapes),
+            penColor = json.optInt("penColor", prefs.penColor), eraserRadius = json.optDouble("eraserRadius", prefs.eraserRadius.toDouble()).toFloat().coerceIn(8f,54f),
+            stylusButtonAction = runCatching { StylusButtonAction.valueOf(json.getString("stylusButtonAction")) }.getOrDefault(prefs.stylusButtonAction),
+            eraserMode = runCatching { EraserMode.valueOf(json.getString("eraserMode")) }.getOrDefault(prefs.eraserMode),
+            quickPenColors = json.optString("quickPenColors").split(',').mapNotNull {it.toLongOrNull(16)?.toInt()}.takeIf {it.size==4} ?: prefs.quickPenColors
+        ))
+        penColor = Color(inputPreferences.penColor)
+    }
+    fun allDocuments(): List<InkBoard> { persistCurrentBoard(); return boards.toList() }
 
     fun updateInputPreferences(value: InputPreferences) {
         inputPreferences = value
@@ -321,27 +427,92 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         CanvasInputSource.MOUSE -> tool
     }
 
-    fun setStylusContact(active: Boolean) { stylusInContact = active }
-
-    fun screenToCanvas(point: Offset): Offset =
-        if (currentBoard?.format == DocumentFormat.NOTEBOOK) point else (point - viewportOffset) / viewportScale
-
+    fun setStylusContact(active: Boolean) {
+        stylusInContact = active
+        lastStylusTime = android.os.SystemClock.uptimeMillis()
+    }
+    fun beginInput() { inputSnapshot = snapshot(); inputUndoCount = undo.size }
+    fun cancelInput() {
+        inputSnapshot?.let { restore(it) }
+        while (undo.size > inputUndoCount) undo.removeLast()
+        currentPoints.clear(); lassoPoints.clear(); eraserCursor = null
+        movingSelection = false; movingConverted = false; eraserGestureChanged = false
+        inputSnapshot = null
+        setStylusContact(false)
+    }
+    fun endInput() { inputSnapshot = null }
+    val notebook get() = currentBoard?.format == DocumentFormat.NOTEBOOK
+    fun pageTop(index: Int): Float = currentBoard?.pages?.take(index)?.sumOf { (it.height + 28f).toDouble() }?.toFloat() ?: 0f
+    fun pageLeft(index: Int): Float {
+        val pages = currentBoard?.pages ?: return 0f
+        return ((pages.maxOfOrNull { it.width } ?: 1000f) - (pages.getOrNull(index)?.width ?: 1000f)) / 2f
+    }
+    fun pageAt(screen: Offset): Int? {
+        if (!notebook) return currentPageIndex
+        val world = (screen - viewportOffset) / viewportScale
+        return currentBoard?.pages?.indices?.firstOrNull { i ->
+            val p = currentBoard!!.pages[i]
+            world.x in pageLeft(i)..(pageLeft(i)+p.width) && world.y in pageTop(i)..(pageTop(i)+p.height)
+        }
+    }
+    fun screenToCanvas(point: Offset): Offset {
+        val world = (point - viewportOffset) / viewportScale
+        val page = currentBoard?.pages?.getOrNull(currentPageIndex)
+        return if (notebook && page != null) world - Offset(pageLeft(currentPageIndex), pageTop(currentPageIndex)) + Offset(page.originX, page.originY) else world
+    }
+    fun canvasToScreen(point: Offset): Offset {
+        val page = currentBoard?.pages?.getOrNull(currentPageIndex)
+        val world = if (notebook && page != null) point + Offset(pageLeft(currentPageIndex)-page.originX, pageTop(currentPageIndex)-page.originY) else point
+        return world * viewportScale + viewportOffset
+    }
     fun panBy(delta: Offset) {
-        if (currentBoard?.format == DocumentFormat.NOTEBOOK) return
-        viewportOffset += delta
+        viewportOffset += delta; constrainViewport()
+        if (notebook) pageAt(Offset(viewportWidth/2,viewportHeight/2))?.let { activatePage(it) }
     }
-
+    fun flush() { persistCurrentBoard() }
     fun zoomBy(factor: Float, centroid: Offset) {
-        if (currentBoard?.format == DocumentFormat.NOTEBOOK) return
-        val nextScale = (viewportScale * factor).coerceIn(0.45f, 4f)
-        val anchor = screenToCanvas(centroid)
-        viewportScale = nextScale
-        viewportOffset = centroid - anchor * nextScale
+        val anchor = (centroid - viewportOffset) / viewportScale
+        viewportScale = (viewportScale * factor).coerceIn(if (notebook) fitScale() * 0.5f else 0.2f, 6f)
+        viewportOffset = centroid - anchor * viewportScale
+        constrainViewport()
     }
-
+    private fun fitScale() = ((viewportWidth - 32f).coerceAtLeast(1f) / (currentBoard?.pages?.maxOfOrNull { it.width } ?: 1000f)).coerceAtMost(6f)
+    fun resizeViewport(width: Float, height: Float) {
+        val first = viewportWidth <= 1f
+        val center = (Offset(viewportWidth/2, viewportHeight/2) - viewportOffset) / viewportScale
+        viewportWidth = width; viewportHeight = height
+        if (first) {
+            val board = currentBoard
+            if (board != null && board.savedScale > 0) {
+                viewportScale = board.savedScale; viewportOffset = Offset(board.savedOffsetX, board.savedOffsetY)
+            } else resetViewport()
+        } else viewportOffset = Offset(width/2, height/2) - center * viewportScale
+        constrainViewport()
+    }
     fun resetViewport() {
-        viewportScale = 1f
+        viewportScale = if (notebook) fitScale() else 1f
         viewportOffset = Offset.Zero
+        if (notebook) scrollToPage(currentPageIndex)
+    }
+    fun fitPage() {
+        val page = currentBoard?.pages?.getOrNull(currentPageIndex) ?: return
+        viewportScale = minOf(fitScale(), (viewportHeight-32f).coerceAtLeast(1f)/page.height)
+        scrollToPage(currentPageIndex)
+    }
+    private fun scrollToPage(index: Int) {
+        if (!notebook) return
+        viewportOffset = Offset(viewportOffset.x, 16f - pageTop(index)*viewportScale)
+        constrainViewport()
+    }
+    private fun constrainViewport() {
+        if (!notebook) return
+        val pages = currentBoard?.pages ?: return
+        val width = (pages.maxOfOrNull { it.width } ?: 1000f)*viewportScale
+        val height = (pages.sumOf { (it.height+28f).toDouble() }.toFloat()-28f)*viewportScale
+        viewportOffset = Offset(
+            if (width < viewportWidth-32f) (viewportWidth-width)/2f else viewportOffset.x.coerceIn(viewportWidth-width-16f, 16f),
+            viewportOffset.y.coerceIn(minOf(16f, viewportHeight-height-16f),16f)
+        )
     }
 
     fun startStroke(point: InkPoint) {
@@ -372,10 +543,12 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun finishStroke(snapToShape: Boolean = false) {
-        if (currentPoints.size > 1) {
+        if (currentPoints.isNotEmpty()) {
             pushUndo()
             val stroke = InkStroke(points = currentPoints.toList(), width = penWidth, color = penColor)
-            strokes += if (inputPreferences.autoShapes && snapToShape) autoRecognizeShape(stroke) else stroke
+            val finished = if (inputPreferences.autoShapes && snapToShape) autoRecognizeShape(stroke) else stroke
+            val page = currentBoard?.pages?.getOrNull(currentPageIndex)
+            strokes += if (notebook && page != null) dev.swart.inklab.core.ink.clipStrokeToPage(finished, Rect(page.originX,page.originY,page.originX+page.width,page.originY+page.height)) else listOf(finished)
             selectedIds = emptySet()
             persistCurrentBoard()
         }
@@ -626,7 +799,8 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         val index = convertedObjects.indexOfFirst { it.id == id }
         if (index < 0 || content.isBlank()) return
         pushUndo()
-        convertedObjects[index] = convertedObjects[index].copy(content = content)
+        val item = convertedObjects[index]
+        convertedObjects[index] = item.copy(content = content, height = if (item.kind == ConvertedInkKind.TEXT) textHeight(content,item.textSize,item.width) else item.height)
         editingConvertedId = null
         selectedConvertedId = id
         persistCurrentBoard()
@@ -654,6 +828,9 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun recognize(context: Context, mode: RecognitionMode) {
+        if (recognition?.loading == true) return
+        val requestBoard = currentBoardId
+        val requestPage = currentBoard?.pages?.getOrNull(currentPageIndex)?.id ?: return
         val id = if (mode == RecognitionMode.TEXT) textProviderId else mathProviderId
         val provider = AppContainer.recognitionRegistry.get(id) ?: return
         val input = strokes.filter { it.id in selectedIds }
@@ -667,17 +844,33 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
             runCatching {
                 provider.recognize(context, input, mode)
             }.onSuccess {
-                recognition = UiRecognition(mode, result = it, sourceIds = sourceIds)
-                applyRecognition()
+                if (currentBoardId != requestBoard || currentBoard?.pages?.getOrNull(currentPageIndex)?.id != requestPage || strokes.filter { it.id in sourceIds } != input) {
+                    recognition = UiRecognition(mode, error = "Страница или рукопись изменилась. Повторите распознавание на исходной странице.")
+                    return@onSuccess
+                }
+                recognition = UiRecognition(mode, result = it, sourceIds = sourceIds, documentId = requestBoard, pageId = requestPage, originalStrokes = input)
+                if (mode == RecognitionMode.MATH) applyRecognition()
             }.onFailure {
                 recognition = UiRecognition(mode, error = it.message ?: "Ошибка распознавания", sourceIds = sourceIds)
             }
         }
     }
 
+    private fun textHeight(content: String, size: Float, width: Float): Float {
+        val paint = android.text.TextPaint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply { textSize = size; typeface = android.graphics.Typeface.create("cursive",android.graphics.Typeface.NORMAL) }
+        return android.text.StaticLayout.Builder.obtain(content,0,content.length,paint,width.toInt().coerceAtLeast(1)).setIncludePad(false).setLineSpacing(0f,1.16f).build().height.toFloat().coerceAtLeast(size)
+    }
+    fun chooseRecognitionCandidate(value: String) {
+        recognition = recognition?.let { it.copy(result = it.result?.copy(primary = value)) }
+        applyRecognition()
+    }
     fun applyRecognition() {
         val state = recognition ?: return
         val result = state.result ?: return
+        if (state.documentId != currentBoardId || state.pageId != currentBoard?.pages?.getOrNull(currentPageIndex)?.id || strokes.filter {it.id in state.sourceIds} != state.originalStrokes) {
+            recognition = UiRecognition(state.mode, error = "Исходная рукопись изменилась. Повторите распознавание.")
+            return
+        }
         val source = strokes.filter { it.id in state.sourceIds }
         if (source.isEmpty() || result.primary.isBlank()) return
         val bounds = sourceBounds(source) ?: return
@@ -686,8 +879,8 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
 
         val isText = state.mode == RecognitionMode.TEXT
         val textSize = if (isText) (bounds.height * 0.76f).coerceIn(18f, 68f) else (bounds.height * 0.72f).coerceIn(20f, 76f)
-        val width = if (isText) max(bounds.width, result.primary.length * textSize * 0.40f) else bounds.width.coerceAtLeast(textSize * 1.5f)
-        val height = if (isText) max(bounds.height, textSize * 1.20f) else bounds.height.coerceAtLeast(textSize * 1.1f)
+        val width = if (isText) bounds.width.coerceAtLeast(textSize * 3f) else bounds.width.coerceAtLeast(textSize * 1.5f)
+        val height = if (isText) textHeight(result.primary, textSize, width) else bounds.height.coerceAtLeast(textSize * 1.1f)
         val objectColor = source.firstOrNull()?.color ?: penColor
         val converted = ConvertedInkObject(
             kind = if (isText) ConvertedInkKind.TEXT else ConvertedInkKind.MATH,
@@ -708,14 +901,20 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         persistCurrentBoard()
     }
 
-    fun prepareProvider(context: Context, id: String) {
+    fun prepareProvider(context: Context, id: String, wifiOnly: Boolean? = null) {
         val provider = AppContainer.recognitionRegistry.get(id) ?: return
+        if (modelProgress.containsKey(id) && wifiOnly == null) return
+        val request = (modelRequests[id] ?: 0) + 1
+        modelRequests[id] = request
+        if (provider is dev.swart.inklab.recognition.mlkit.MlKitDigitalInkProvider) provider.wifiOnly = wifiOnly ?: inputPreferences.wifiOnlyModels
         modelErrors.remove(id)
         modelProgress[id] = 0f
         viewModelScope.launch {
-            provider.prepare(context) { progress -> viewModelScope.launch { modelProgress[id] = progress } }
-                .onFailure { modelErrors[id] = it.message ?: "Не удалось загрузить модель" }
-            modelProgress.remove(id)
+            val result = provider.prepare(context) { progress -> viewModelScope.launch { if(modelRequests[id]==request) modelProgress[id] = progress } }
+            if (modelRequests[id] == request) {
+                result.onFailure { modelErrors[id] = it.message ?: "Не удалось загрузить модель" }.onSuccess {modelErrors.remove(id)}
+                modelProgress.remove(id)
+            }
         }
     }
 
@@ -734,15 +933,21 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         redo.clear()
     }
 
-    private fun snapshot() = DocumentSnapshot(strokes.toList(), convertedObjects.toList())
+    private fun currentDocument(): InkBoard {
+        val board = currentBoard ?: return InkBoard()
+        val pages = board.pages.toMutableList()
+        if (currentPageIndex in pages.indices) pages[currentPageIndex] = pages[currentPageIndex].copy(strokes = strokes.toList(), convertedObjects = convertedObjects.toList())
+        return board.copy(pages = pages, lastPageIndex = currentPageIndex)
+    }
+    private fun snapshot() = DocumentSnapshot(currentDocument(), currentPageIndex)
 
     private fun restore(snapshot: DocumentSnapshot) {
-        strokes.clear()
-        strokes += snapshot.strokes
-        convertedObjects.clear()
-        convertedObjects += snapshot.convertedObjects
+        val board = currentBoard ?: return
+        if (board.id != snapshot.board.id) return
+        replaceBoard(board.copy(pages = snapshot.board.pages, trashedPages = snapshot.board.trashedPages))
+        loadPage(snapshot.pageIndex.coerceIn(0, snapshot.board.pages.lastIndex))
         clearSelection()
-        persistCurrentBoard()
+        scheduleSave()
     }
 
     private fun sourceBounds(source: List<InkStroke>): Rect? {
@@ -771,6 +976,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         )
         boards[index] = board.copy(
             pages = pages,
+            savedScale = viewportScale, savedOffsetX = viewportOffset.x, savedOffsetY = viewportOffset.y,
             lastPageIndex = currentPageIndex,
             updatedAt = System.currentTimeMillis()
         )
@@ -780,27 +986,25 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     private fun loadPage(index: Int) {
         val board = currentBoard ?: return
         val page = board.pages.getOrNull(index) ?: return
+        val changedPage = index != currentPageIndex
         currentPageIndex = index
+        val app = getApplication<Application>()
+        val active = dev.swart.inklab.audio.AudioHub.activeId
+        if (changedPage && active != null && dev.swart.inklab.audio.AudioStore(app).list().any { it.id == active && it.boardId == board.id }) {
+            dev.swart.inklab.audio.recordingCommand(app, "mark", pageId = page.id, title = "Лист ${index + 1}")
+        }
         strokes.clear()
         strokes += page.strokes
         convertedObjects.clear()
         convertedObjects += page.convertedObjects
         clearSelection()
-        undo.clear()
-        redo.clear()
-        resetViewport()
         scheduleSave()
     }
 
     private fun scheduleSave() {
-        saveJob?.cancel()
-        val boardSnapshot = boards.toList()
-        val folderSnapshot = folders.toList()
-        saveJob = viewModelScope.launch(Dispatchers.IO) {
-            delay(220)
-            boardRepository.save(boardSnapshot)
-            boardRepository.saveFolders(folderSnapshot)
-        }
+        if (boardRepository.loadError != null) return
+        saving = true
+        saves.trySend(boards.toList() to folders.toList())
     }
 
     private fun Rect.inflate(value: Float) = Rect(left - value, top - value, right + value, bottom + value)

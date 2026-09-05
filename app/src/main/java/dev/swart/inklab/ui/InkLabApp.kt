@@ -23,6 +23,7 @@ import dev.swart.inklab.ui.theme.InkColors
 @Composable
 fun InkLabApp(vm: EditorViewModel = viewModel()) {
     Box(Modifier.fillMaxSize().background(InkColors.Paper).windowInsetsPadding(WindowInsets.safeDrawing)) {
+        if (vm.screen != AppScreen.EDITOR) dev.swart.inklab.ui.screens.WorkspaceDialogs(vm)
         AnimatedContent(
             targetState = vm.screen,
             transitionSpec = { fadeIn(tween(180)) togetherWith fadeOut(tween(140)) },

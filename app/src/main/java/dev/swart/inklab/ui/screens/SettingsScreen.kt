@@ -2,6 +2,8 @@ package dev.swart.inklab.ui.screens
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
+import androidx.compose.foundation.selection.toggleable
+import androidx.compose.ui.semantics.Role
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
@@ -96,8 +98,24 @@ fun SettingsScreen(vm: EditorViewModel, onBack: () -> Unit) {
                 }
             }
             item {
+                SettingsCard("Жесты", "Отмена коротким одновременным касанием двух пальцев") {
+                    SettingSwitch("Отмена двумя пальцами", "Блокируется рядом со стилусом и сразу после письма", preferences.twoFingerUndo) {
+                        vm.updateInputPreferences(preferences.copy(twoFingerUndo = it))
+                    }
+                    Text("Палец прокручивает страницы, два пальца меняют масштаб. Для отмены уберите перо от экрана.", color = InkColors.Muted)
+                }
+            }
+            item { Action("Языковые пакеты распознавания") { vm.languagePanel = true } }
+            item { Action("Резервные копии и корзина") { vm.libraryTools = true } }
+            item {
                 SettingsCard("Оформление", "Комфортный вид днём и вечером") {
-                    SettingSwitch("Тёмная тема", "Тёмный интерфейс с сохранением выбранного цвета бумаги", preferences.darkTheme) {
+                    SettingSwitch("Как в системе", "Автоматически выбирать тему Android", preferences.systemTheme) {
+                        vm.updateInputPreferences(preferences.copy(systemTheme = it))
+                    }
+                    SettingSwitch("Ночной вид бумаги", "Адаптировать бумагу и нейтральные чернила только на экране", preferences.nightPaper) {
+                        vm.updateInputPreferences(preferences.copy(nightPaper = it))
+                    }
+                    SettingSwitch("Тёмная тема", "Используется, когда системная тема отключена", preferences.darkTheme) {
                         vm.updateInputPreferences(preferences.copy(darkTheme = it))
                     }
                 }
@@ -121,12 +139,12 @@ private fun SettingsCard(title: String, subtitle: String, content: @Composable C
 
 @Composable
 private fun SettingSwitch(title: String, subtitle: String, value: Boolean, onChange: (Boolean) -> Unit) {
-    Row(verticalAlignment = Alignment.CenterVertically) {
+    Row(Modifier.toggleable(value=value,role=Role.Switch,onValueChange=onChange),verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) {
             Text(title)
             Text(subtitle, style = MaterialTheme.typography.bodySmall, color = InkColors.Muted)
         }
-        Switch(value, onChange)
+        Switch(value, null)
     }
 }
 

@@ -1,5 +1,14 @@
 package dev.swart.inklab.ui.screens
 
+import androidx.compose.ui.input.pointer.pointerInteropFilter
+import androidx.compose.ui.input.pointer.motionEventSpy
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.graphics.drawscope.clipRect
+import androidx.compose.ui.graphics.drawscope.translate
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.runtime.DisposableEffect
+import dev.swart.inklab.ui.theme.*
+import dev.swart.inklab.core.input.CanvasInputController
 import android.graphics.Paint
 import android.graphics.Typeface
 import androidx.compose.foundation.Canvas
@@ -51,12 +60,20 @@ import kotlin.math.min
 
 private const val SHAPE_HOLD_MS = 520L
 
+@OptIn(androidx.compose.ui.ExperimentalComposeUiApi::class)
 @Composable
 fun EditorCanvas(vm: EditorViewModel, modifier: Modifier = Modifier) {
+    val palette = LocalInkPalette.current
+    val context = LocalContext.current
+    val controller = remember(vm, vm.currentBoardId) { CanvasInputController(vm, android.view.ViewConfiguration.get(context).scaledTouchSlop.toFloat()) }
+    DisposableEffect(controller) { onDispose { controller.cancel() } }
+    val night = palette.dark && vm.inputPreferences.nightPaper
     val boardSettings = vm.currentBoard?.settings
     val notebook = vm.currentBoard?.format == DocumentFormat.NOTEBOOK
-    val paperColor = boardSettings?.paperColor?.let(::Color) ?: InkColors.PaperRaised
-    val mathCache = remember { mutableMapOf<String, JLatexMathDrawable?>() }
+    val paperColor = paperDisplayColor(boardSettings?.paperColor?.let(::Color) ?: palette.PaperRaised, night)
+    val ruleColor = if (paperColor.red < 0.5f) Color(0xFF565860) else Color(0xFFC9C5BC)
+    fun displayInk(color: Color) = inkDisplayColor(color, paperColor, night)
+    val mathCache = remember { object : LinkedHashMap<String, JLatexMathDrawable?>(32, 0.75f, true) { override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, JLatexMathDrawable?>?) = size > 64 } }
     val textPaint = remember {
         Paint(Paint.ANTI_ALIAS_FLAG).apply {
             typeface = Typeface.create("cursive", Typeface.NORMAL)
@@ -90,146 +107,54 @@ fun EditorCanvas(vm: EditorViewModel, modifier: Modifier = Modifier) {
 
     Canvas(
         modifier = modifier
-            .background(paperColor)
-            .pointerInput(vm.tool, vm.inputPreferences, notebook) {
-                awaitEachGesture {
-                    val firstEvent = awaitPointerEvent(PointerEventPass.Initial)
-                    val down = firstEvent.changes.firstOrNull { it.pressed } ?: return@awaitEachGesture
-                    val source = when (down.type) {
-                        PointerType.Stylus -> CanvasInputSource.STYLUS
-                        PointerType.Eraser -> CanvasInputSource.STYLUS_ERASER
-                        PointerType.Touch -> CanvasInputSource.TOUCH
-                        else -> CanvasInputSource.MOUSE
-                    }
-
-                    if (source == CanvasInputSource.TOUCH && vm.inputPreferences.palmRejection && vm.stylusInContact) {
-                        while (firstEvent.changes.any { it.pressed }) {
-                            val event = awaitPointerEvent(PointerEventPass.Initial)
-                            event.changes.forEach { it.consume() }
-                            if (event.changes.none { it.pressed }) break
-                        }
-                        return@awaitEachGesture
-                    }
-
-                    if (source == CanvasInputSource.TOUCH) {
-                        val startedAt = System.currentTimeMillis()
-                        val startPosition = down.position
-                        var event = firstEvent
-                        var usedTwoFingers = false
-                        var transformed = false
-                        var oneFingerDrag = false
-                        while (event.changes.any { it.pressed }) {
-                            val pressed = event.changes.filter { it.pressed }
-                            val centroid = event.calculateCentroid(useCurrent = true)
-                            val zoom = event.calculateZoom()
-                            val pan = event.calculatePan()
-                            if (pressed.size >= 2) {
-                                usedTwoFingers = true
-                                if (!notebook && zoom.isFinite() && abs(zoom - 1f) > 0.002f) {
-                                    vm.zoomBy(zoom, centroid)
-                                    if (abs(zoom - 1f) > 0.015f) transformed = true
-                                }
-                                if (!notebook && pan.getDistance() > 0.7f) {
-                                    vm.panBy(pan)
-                                    if (pan.getDistance() > viewConfiguration.touchSlop / 2f) transformed = true
-                                }
-                            } else if (!usedTwoFingers && pressed.isNotEmpty()) {
-                                val distance = (pressed.first().position - startPosition).getDistance()
-                                if (distance > viewConfiguration.touchSlop) oneFingerDrag = true
-                                if (!notebook && oneFingerDrag && pan != Offset.Zero) vm.panBy(pan)
-                            }
-                            event.changes.forEach { if (it.positionChanged()) it.consume() }
-                            event = awaitPointerEvent(PointerEventPass.Initial)
-                        }
-                        val shortTap = System.currentTimeMillis() - startedAt < 420L
-                        when {
-                            usedTwoFingers && !transformed && shortTap -> vm.undo()
-                            !usedTwoFingers && !oneFingerDrag && shortTap -> vm.selectObjectAt(vm.screenToCanvas(startPosition))
-                        }
-                        return@awaitEachGesture
-                    }
-
-                    val sideButton = firstEvent.hasStylusButton()
-                    val activeTool = vm.effectiveTool(source, sideButton)
-                    if (activeTool == null) {
-                        while (true) {
-                            val event = awaitPointerEvent(PointerEventPass.Initial)
-                            if (event.changes.none { it.pressed }) break
-                        }
-                        return@awaitEachGesture
-                    }
-
-                    val isStylus = source == CanvasInputSource.STYLUS || source == CanvasInputSource.STYLUS_ERASER
-                    if (isStylus) vm.setStylusContact(true)
-                    val start = vm.screenToCanvas(down.position)
-                    when (activeTool) {
-                        EditorTool.PEN -> vm.startStroke(down.toInkPoint(start, vm.inputPreferences.pressureEnabled))
-                        EditorTool.ERASER -> {
-                            vm.beginErase()
-                            vm.eraserCursor = start
-                            vm.eraseAt(start)
-                        }
-                        EditorTool.LASSO -> vm.startLasso(start)
-                    }
-                    down.consume()
-
-                    while (true) {
-                        val event = awaitPointerEvent(PointerEventPass.Initial)
-                        val change = event.changes.firstOrNull { it.id == down.id } ?: event.changes.firstOrNull()
-                        if (change == null || !change.pressed) break
-                        val point = vm.screenToCanvas(change.position)
-                        when (activeTool) {
-                            EditorTool.PEN -> vm.addPoint(change.toInkPoint(point, vm.inputPreferences.pressureEnabled))
-                            EditorTool.ERASER -> {
-                                vm.eraserCursor = point
-                                vm.eraseAt(point)
-                            }
-                            EditorTool.LASSO -> vm.addLasso(point)
-                        }
-                        change.consume()
-                    }
-
-                    val heldAtEndMs = if (activeTool == EditorTool.PEN && isStylus) {
-                        System.currentTimeMillis() - (vm.currentPoints.lastOrNull()?.timestamp ?: System.currentTimeMillis())
-                    } else 0L
-                    when (activeTool) {
-                        EditorTool.PEN -> vm.finishStroke(snapToShape = isStylus && heldAtEndMs >= SHAPE_HOLD_MS)
-                        EditorTool.ERASER -> vm.finishErase()
-                        EditorTool.LASSO -> vm.finishLasso()
-                    }
-                    if (isStylus) vm.setStylusContact(false)
-                }
+            .background(if (notebook) palette.Paper else paperColor)
+            .onSizeChanged { vm.resizeViewport(it.width.toFloat(), it.height.toFloat()) }
+            .motionEventSpy { event ->
+                if (event.actionMasked in android.view.MotionEvent.ACTION_HOVER_MOVE..android.view.MotionEvent.ACTION_HOVER_EXIT) controller.hover(event)
             }
+            .pointerInteropFilter { controller.event(it) }
     ) {
         val scale = vm.viewportScale
         val offset = vm.viewportOffset
-        val worldLeft = -offset.x / scale
-        val worldTop = -offset.y / scale
-        val worldRight = worldLeft + size.width / scale
-        val worldBottom = worldTop + size.height / scale
-        val spacing = (boardSettings?.spacing ?: 36f).coerceAtLeast(12f)
-
-        withTransform({
-            translate(offset.x, offset.y)
-            scale(scale, scale, pivot = Offset.Zero)
-        }) {
+        val pages = vm.currentBoard?.pages ?: emptyList()
+        pages.forEachIndexed { index, page ->
+            val active = index == vm.currentPageIndex
+            val pageX = if (notebook) vm.pageLeft(index) else 0f
+            val pageY = if (notebook) vm.pageTop(index) else 0f
+            if (notebook && ((pageY + page.height)*scale + offset.y < 0 || pageY*scale + offset.y > size.height)) return@forEachIndexed
+            if (!notebook && !active) return@forEachIndexed
+            val worldLeft = if (notebook) page.originX else -offset.x / scale
+            val worldTop = if (notebook) page.originY else -offset.y / scale
+            val worldRight = if (notebook) worldLeft + page.width else worldLeft + size.width / scale
+            val worldBottom = if (notebook) worldTop + page.height else worldTop + size.height / scale
+            val spacing = (boardSettings?.spacing ?: 36f).coerceAtLeast(12f)
+            withTransform({
+                translate(offset.x, offset.y)
+                scale(scale, scale, pivot = Offset.Zero)
+                if (notebook) translate(pageX-page.originX,pageY-page.originY)
+            }) {
+            if (notebook) {
+                drawRect(palette.Ink.copy(alpha=0.06f), Offset(worldLeft-2f/scale, worldTop+3f/scale), androidx.compose.ui.geometry.Size(page.width+4f/scale,page.height+2f/scale))
+            }
+            clipRect(worldLeft, worldTop, worldRight, worldBottom) {
+            drawRect(paperColor, Offset(worldLeft,worldTop), androidx.compose.ui.geometry.Size(worldRight-worldLeft,worldBottom-worldTop))
             when (boardSettings?.pattern ?: PaperPattern.RULED) {
                 PaperPattern.RULED -> {
                     var y = floor(worldTop / spacing) * spacing
                     while (y < worldBottom) {
-                        drawLine(InkColors.Line.copy(alpha = 0.58f), Offset(worldLeft, y), Offset(worldRight, y), 1f / scale)
+                        drawLine(ruleColor.copy(alpha = 0.58f), Offset(worldLeft, y), Offset(worldRight, y), 1f / scale)
                         y += spacing
                     }
                 }
                 PaperPattern.GRID -> {
                     var y = floor(worldTop / spacing) * spacing
                     while (y < worldBottom) {
-                        drawLine(InkColors.Line.copy(alpha = 0.48f), Offset(worldLeft, y), Offset(worldRight, y), 1f / scale)
+                        drawLine(ruleColor.copy(alpha = 0.48f), Offset(worldLeft, y), Offset(worldRight, y), 1f / scale)
                         y += spacing
                     }
                     var x = floor(worldLeft / spacing) * spacing
                     while (x < worldRight) {
-                        drawLine(InkColors.Line.copy(alpha = 0.48f), Offset(x, worldTop), Offset(x, worldBottom), 1f / scale)
+                        drawLine(ruleColor.copy(alpha = 0.48f), Offset(x, worldTop), Offset(x, worldBottom), 1f / scale)
                         x += spacing
                     }
                 }
@@ -238,7 +163,7 @@ fun EditorCanvas(vm: EditorViewModel, modifier: Modifier = Modifier) {
                     while (y < worldBottom) {
                         var x = floor(worldLeft / spacing) * spacing
                         while (x < worldRight) {
-                            drawCircle(InkColors.Line, 1.2f / scale, Offset(x, y))
+                            drawCircle(ruleColor, 1.2f / scale, Offset(x, y))
                             x += spacing
                         }
                         y += spacing
@@ -247,57 +172,49 @@ fun EditorCanvas(vm: EditorViewModel, modifier: Modifier = Modifier) {
                 PaperPattern.BLANK -> Unit
             }
             if (boardSettings?.showMargin == true) {
-                drawLine(InkColors.Rose.copy(alpha = 0.8f), Offset(74f, worldTop), Offset(74f, worldBottom), 1.4f / scale)
+                drawLine(palette.Rose.copy(alpha = 0.8f), Offset(74f, worldTop), Offset(74f, worldBottom), 1.4f / scale)
             }
 
             fun drawStroke(points: List<InkPoint>, width: Float, color: Color, selected: Boolean = false) {
+                if (points.size == 1) drawCircle(displayInk(color), width / 2f, points.first().offset())
                 if (points.size < 2) return
                 points.zipWithNext().forEach { (a, b) ->
                     val pressure = ((a.pressure + b.pressure) / 2f).coerceIn(0.15f, 1f)
                     val segmentWidth = width * (0.55f + pressure * 0.75f)
                     if (selected) {
-                        drawLine(InkColors.Accent.copy(alpha = 0.16f), a.offset(), b.offset(), segmentWidth + 10f / scale, StrokeCap.Round)
+                        drawLine(palette.Accent.copy(alpha = 0.16f), a.offset(), b.offset(), segmentWidth + 10f / scale, StrokeCap.Round)
                     }
-                    drawLine(color, a.offset(), b.offset(), segmentWidth, StrokeCap.Round)
+                    drawLine(displayInk(color), a.offset(), b.offset(), segmentWidth, StrokeCap.Round)
                 }
             }
 
-            vm.strokes.forEach { drawStroke(it.points, it.width, it.color, it.id in vm.selectedIds) }
-            shapePreview?.let { preview ->
+            (if (active) vm.strokes else page.strokes).forEach { drawStroke(it.points, it.width, it.color, active && it.id in vm.selectedIds) }
+            if (active) { shapePreview?.let { preview ->
                 drawStroke(preview.points, preview.width, preview.color)
-            } ?: drawStroke(vm.currentPoints, vm.penWidth, vm.penColor)
+            } ?: drawStroke(vm.currentPoints, vm.penWidth, vm.penColor) }
 
-            vm.convertedObjects.forEach { item ->
+            (if (active) vm.convertedObjects else page.convertedObjects).forEach { item ->
                 if (item.kind == ConvertedInkKind.TEXT) {
                     drawIntoCanvas { canvas ->
-                        textPaint.color = item.color.toArgb()
+                        textPaint.color = displayInk(item.color).toArgb()
                         textPaint.textSize = item.textSize
                         textPaint.typeface = Typeface.create("cursive", Typeface.NORMAL)
                         val native = canvas.nativeCanvas
-                        val words = item.content.replace('\n', ' ').split(Regex("\\s+")).filter { it.isNotBlank() }
-                        val maxWidth = item.width.coerceAtLeast(item.textSize * 2f)
-                        val lineHeight = item.textSize * 1.16f
-                        var line = ""
-                        var y = item.y + item.textSize
-                        for (word in words) {
-                            val candidate = if (line.isEmpty()) word else "$line $word"
-                            if (line.isNotEmpty() && textPaint.measureText(candidate) > maxWidth) {
-                                native.drawText(line, item.x, y, textPaint)
-                                line = word
-                                y += lineHeight
-                            } else {
-                                line = candidate
-                            }
-                        }
-                        if (line.isNotEmpty()) native.drawText(line, item.x, y, textPaint)
+                        val paint = android.text.TextPaint(textPaint)
+                        val layout = android.text.StaticLayout.Builder.obtain(item.content, 0, item.content.length, paint, item.width.toInt().coerceAtLeast(1))
+                            .setIncludePad(false).setLineSpacing(0f, 1.16f).build()
+                        val save = native.save()
+                        native.translate(item.x, item.y)
+                        layout.draw(native)
+                        native.restoreToCount(save)
                     }
                 } else {
-                    val cacheKey = "${item.content}|${item.textSize.toInt()}|${item.color.toArgb()}"
+                    val cacheKey = "${item.content}|${item.textSize.toInt()}|${displayInk(item.color).toArgb()}"
                     val drawable = mathCache.getOrPut(cacheKey) {
                         runCatching {
                             JLatexMathDrawable.builder(item.content)
                                 .textSize(item.textSize)
-                                .color(item.color.toArgb())
+                                .color(displayInk(item.color).toArgb())
                                 .align(JLatexMathDrawable.ALIGN_LEFT)
                                 .build()
                         }.getOrNull()
@@ -319,7 +236,7 @@ fun EditorCanvas(vm: EditorViewModel, modifier: Modifier = Modifier) {
                         }
                     } else {
                         drawIntoCanvas { canvas ->
-                            textPaint.color = item.color.toArgb()
+                            textPaint.color = displayInk(item.color).toArgb()
                             textPaint.textSize = item.textSize * 0.62f
                             textPaint.typeface = Typeface.MONOSPACE
                             canvas.nativeCanvas.drawText(item.content, item.x, item.y + item.textSize, textPaint)
@@ -327,16 +244,16 @@ fun EditorCanvas(vm: EditorViewModel, modifier: Modifier = Modifier) {
                     }
                 }
 
-                if (item.id == vm.selectedConvertedId) {
+                if (active && item.id == vm.selectedConvertedId) {
                     drawRoundRect(
-                        color = InkColors.Accent.copy(alpha = 0.07f),
+                        color = palette.Accent.copy(alpha = 0.07f),
                         topLeft = item.bounds().topLeft - Offset(8f / scale, 8f / scale),
                         size = androidx.compose.ui.geometry.Size(item.width + 16f / scale, item.height + 16f / scale),
                         cornerRadius = androidx.compose.ui.geometry.CornerRadius(11f / scale),
                         style = Fill
                     )
                     drawRoundRect(
-                        color = InkColors.Accent,
+                        color = palette.Accent,
                         topLeft = item.bounds().topLeft - Offset(8f / scale, 8f / scale),
                         size = androidx.compose.ui.geometry.Size(item.width + 16f / scale, item.height + 16f / scale),
                         cornerRadius = androidx.compose.ui.geometry.CornerRadius(11f / scale),
@@ -345,18 +262,18 @@ fun EditorCanvas(vm: EditorViewModel, modifier: Modifier = Modifier) {
                 }
             }
 
-            if (vm.lassoPoints.size > 1) {
+            if (active && vm.lassoPoints.size > 1) {
                 val path = Path().apply {
                     moveTo(vm.lassoPoints.first().x, vm.lassoPoints.first().y)
                     vm.lassoPoints.drop(1).forEach { lineTo(it.x, it.y) }
                 }
-                drawPath(path, InkColors.Accent.copy(alpha = 0.08f), style = Fill)
-                drawPath(path, InkColors.Accent, style = Stroke(2.2f / scale, cap = StrokeCap.Round, pathEffect = PathEffect.dashPathEffect(floatArrayOf(8f / scale, 6f / scale))))
+                drawPath(path, palette.Accent.copy(alpha = 0.08f), style = Fill)
+                drawPath(path, palette.Accent, style = Stroke(2.2f / scale, cap = StrokeCap.Round, pathEffect = PathEffect.dashPathEffect(floatArrayOf(8f / scale, 6f / scale))))
             }
 
-            vm.currentSelectionBounds?.let { bounds ->
+            if (active) vm.currentSelectionBounds?.let { bounds ->
                 drawRoundRect(
-                    color = InkColors.Accent,
+                    color = palette.Accent,
                     topLeft = bounds.topLeft - Offset(7f / scale, 7f / scale),
                     size = androidx.compose.ui.geometry.Size(bounds.width + 14f / scale, bounds.height + 14f / scale),
                     cornerRadius = androidx.compose.ui.geometry.CornerRadius(10f / scale),
@@ -364,23 +281,12 @@ fun EditorCanvas(vm: EditorViewModel, modifier: Modifier = Modifier) {
                 )
             }
 
-            vm.eraserCursor?.let { cursor ->
-                drawCircle(InkColors.Accent.copy(alpha = 0.08f), vm.inputPreferences.eraserRadius / scale, cursor)
-                drawCircle(InkColors.Accent.copy(alpha = 0.65f), vm.inputPreferences.eraserRadius / scale, cursor, style = Stroke(1.4f / scale))
+            if (active) vm.eraserCursor?.let { cursor ->
+                drawCircle(palette.Accent.copy(alpha = 0.08f), vm.inputPreferences.eraserRadius / scale, cursor)
+                drawCircle(palette.Accent.copy(alpha = 0.65f), vm.inputPreferences.eraserRadius / scale, cursor, style = Stroke(1.4f / scale))
             }
         }
     }
 }
-
-private fun androidx.compose.ui.input.pointer.PointerEvent.hasStylusButton(): Boolean =
-    buttons.isPrimaryPressed || buttons.isSecondaryPressed || buttons.isTertiaryPressed
-
-private fun androidx.compose.ui.input.pointer.PointerInputChange.toInkPoint(
-    canvasPoint: Offset,
-    pressureEnabled: Boolean
-) = InkPoint(
-    x = canvasPoint.x,
-    y = canvasPoint.y,
-    timestamp = System.currentTimeMillis(),
-    pressure = if (pressureEnabled) pressure.coerceIn(0.15f, 1f) else 0.6f
-)
+}
+}

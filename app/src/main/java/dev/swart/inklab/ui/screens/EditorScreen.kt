@@ -4,6 +4,8 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.scaleIn
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -36,6 +38,8 @@ import androidx.compose.material.icons.outlined.FitScreen
 import androidx.compose.material.icons.outlined.Functions
 import androidx.compose.material.icons.outlined.Gesture
 import androidx.compose.material.icons.outlined.Menu
+import androidx.compose.material.icons.outlined.Mic
+import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.NoteAlt
 import androidx.compose.material.icons.outlined.Redo
 import androidx.compose.material.icons.outlined.Settings
@@ -107,51 +111,39 @@ fun EditorScreen(vm: EditorViewModel) {
 
     ModalNavigationDrawer(
         drawerState = drawerState,
-        gesturesEnabled = vm.selectionBounds == null,
+        gesturesEnabled = false,
         drawerContent = { EditorDrawer(vm) { scope.launch { drawerState.close() } } }
     ) {
         Box(Modifier.fillMaxSize().background(InkColors.Paper)) {
             Column(Modifier.fillMaxSize()) {
-                TopBar(vm, onMenu = { scope.launch { drawerState.open() } })
-                Box(Modifier.fillMaxSize().padding(horizontal = 18.dp, vertical = 10.dp)) {
-                    val pageModifier = if (board?.format == DocumentFormat.NOTEBOOK) {
-                        Modifier.fillMaxHeight().aspectRatio(
-                            if (board.orientation == PageOrientation.PORTRAIT) 1f / 1.4142f else 1.4142f,
-                            matchHeightConstraintsFirst = true
-                        )
-                    } else Modifier.fillMaxSize()
-
-                    Surface(
-                        pageModifier.align(Alignment.Center),
-                        shape = RoundedCornerShape(if (board?.format == DocumentFormat.NOTEBOOK) 14.dp else 30.dp),
-                        color = InkColors.PaperRaised,
-                        shadowElevation = 3.dp
-                    ) {
-                        BoxWithConstraints(Modifier.fillMaxSize()) {
+                if (!vm.fullScreen) TopBar(vm, onMenu = { scope.launch { drawerState.open() } })
+                if (!vm.fullScreen) {
+                    Row(Modifier.fillMaxWidth().background(InkColors.PaperRaised), verticalAlignment = Alignment.CenterVertically) {
+                        ToolDock(vm, Modifier.weight(1f))
+                        IconButton(onClick = { vm.pagePanel = !vm.pagePanel }) { Icon(Icons.Outlined.NoteAlt, "Страницы") }
+                    }
+                }
+                BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
+                    val wideWorkspace = maxWidth >= 900.dp
+                    Row(Modifier.fillMaxSize()) {
+                        if (wideWorkspace && vm.pagePanel && !vm.fullScreen) InlinePageRail(vm)
+                        BoxWithConstraints(Modifier.weight(1f).fillMaxHeight()) {
+                            val showPageCount = maxWidth > 600.dp
                             EditorCanvas(vm, Modifier.fillMaxSize())
                             ObjectMenu(vm, context)
+                            Row(Modifier.align(Alignment.BottomEnd).padding(12.dp).horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                if (showPageCount) AssistChip(onClick = { vm.pagePanel = !vm.pagePanel }, label = { Text("Лист ${vm.currentPageIndex + 1} / ${board?.pages?.size ?: 1}") })
+                                AssistChip(onClick = vm::resetViewport, label = { Text("По ширине") })
+                                AssistChip(onClick = vm::fitPage, label = { Text("Лист целиком") })
+                                AssistChip(onClick = { vm.fullScreen = !vm.fullScreen }, label = { Text(if (vm.fullScreen) "Панели" else "Фокус") })
+                            }
                         }
-                    }
-
-                    ToolDock(
-                        vm,
-                        Modifier.align(Alignment.TopCenter).padding(top = 10.dp).zIndex(5f)
-                    )
-                    if (board?.format != DocumentFormat.NOTEBOOK) {
-                        AssistChip(
-                            onClick = vm::resetViewport,
-                            label = { Text("${(vm.viewportScale * 100).toInt()}%") },
-                            leadingIcon = { Icon(Icons.Outlined.FitScreen, null, Modifier.size(16.dp)) },
-                            modifier = Modifier.align(Alignment.BottomEnd).padding(18.dp)
-                        )
-                    }
-                    if (board?.format == DocumentFormat.NOTEBOOK) {
-                        PageControls(vm, Modifier.align(Alignment.BottomCenter).padding(bottom = 14.dp).zIndex(4f))
                     }
                 }
             }
-
             RecognitionStatus(vm, Modifier.align(Alignment.TopCenter).padding(top = 76.dp).zIndex(10f))
+            WorkspaceDialogs(vm)
+
             vm.editingConvertedObject?.let { EditConvertedDialog(vm, it.kind, it.content) }
         }
     }
@@ -179,7 +171,7 @@ private fun EditorDrawer(vm: EditorViewModel, close: () -> Unit) {
             )
             HorizontalDivider(Modifier.padding(vertical = 14.dp), color = InkColors.Line)
             Text("Недавние", color = InkColors.Muted, style = MaterialTheme.typography.labelMedium, modifier = Modifier.padding(horizontal = 14.dp, vertical = 6.dp))
-            vm.boards.take(6).forEach { item ->
+            vm.boards.filter { it.deletedAt == null }.take(6).forEach { item ->
                 NavigationDrawerItem(
                     label = { Text(item.title, maxLines = 1) },
                     selected = item.id == vm.currentBoardId,
@@ -197,13 +189,14 @@ private fun TopBar(vm: EditorViewModel, onMenu: () -> Unit) {
     val board = vm.currentBoard
     Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
         IconButton(onClick = onMenu) { Icon(Icons.Outlined.Menu, "Меню") }
-        Text(
-            board?.title ?: "InkLab",
-            modifier = Modifier.weight(1f).padding(start = 8.dp).clickable(enabled = board != null) { renameDialog = true },
-            style = MaterialTheme.typography.titleLarge,
-            fontWeight = FontWeight.SemiBold,
-            maxLines = 1
-        )
+        Column(Modifier.weight(1f).padding(start = 8.dp).clickable(enabled = board != null) { renameDialog = true }) {
+            Text(board?.title ?: "InkLab", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold,
+                maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+            Text(if (vm.storageError != null) "Ошибка сохранения" else if (vm.saving) "Сохраняю…" else "Сохранено на устройстве",
+                color = InkColors.Muted, style = MaterialTheme.typography.labelSmall, maxLines = 1)
+        }
+        IconButton(onClick = { vm.audioPanel = true }) { Icon(Icons.Outlined.Mic, "Диктофон", tint = if (dev.swart.inklab.audio.AudioHub.activeId != null) MaterialTheme.colorScheme.error else InkColors.Ink) }
+        IconButton(onClick = { vm.libraryTools = true }) { Icon(Icons.Outlined.MoreVert, "Действия с документом") }
         IconButton(onClick = vm::undo) { Icon(Icons.Outlined.Undo, "Отменить") }
         IconButton(onClick = vm::redo) { Icon(Icons.Outlined.Redo, "Повторить") }
         Box {
@@ -266,7 +259,7 @@ private fun ToolDock(vm: EditorViewModel, modifier: Modifier = Modifier) {
     var editingColorSlot by remember { mutableStateOf<Int?>(null) }
     Box(modifier) {
         GlassPanel {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+            Row(Modifier.horizontalScroll(rememberScrollState()), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
                 ToolButton(Icons.Outlined.Draw, "Перо", vm.tool == EditorTool.PEN) {
                     if (vm.tool == EditorTool.PEN) optionsFor = EditorTool.PEN else vm.tool = EditorTool.PEN
                 }
@@ -410,9 +403,9 @@ private fun BoxWithConstraintsScope.ObjectMenu(vm: EditorViewModel, context: and
     val menuWidth = with(density) { 306.dp.toPx() }
     val menuHeight = with(density) { 58.dp.toPx() }
     val margin = with(density) { 12.dp.toPx() }
-    val screenX = bounds.center.x * vm.viewportScale + vm.viewportOffset.x
-    val screenTop = bounds.top * vm.viewportScale + vm.viewportOffset.y
-    val screenBottom = bounds.bottom * vm.viewportScale + vm.viewportOffset.y
+    val screenX = vm.canvasToScreen(bounds.center).x
+    val screenTop = vm.canvasToScreen(bounds.topLeft).y
+    val screenBottom = vm.canvasToScreen(bounds.bottomRight).y
     val widthPx = constraints.maxWidth.toFloat()
     val heightPx = constraints.maxHeight.toFloat()
     val x = (screenX - menuWidth / 2f).coerceIn(margin, (widthPx - menuWidth - margin).coerceAtLeast(margin))
@@ -422,7 +415,7 @@ private fun BoxWithConstraintsScope.ObjectMenu(vm: EditorViewModel, context: and
     AnimatedVisibility(
         visible = true,
         enter = fadeIn() + scaleIn(initialScale = 0.82f),
-        modifier = Modifier.offset { IntOffset(x.roundToInt(), y.coerceIn(margin, heightPx - menuHeight - margin).roundToInt()) }.zIndex(8f)
+        modifier = Modifier.offset { IntOffset(x.roundToInt(), y.coerceIn(margin, (heightPx - menuHeight - margin).coerceAtLeast(margin)).roundToInt()) }.zIndex(8f)
     ) {
         GlassPanel {
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -434,9 +427,10 @@ private fun BoxWithConstraintsScope.ObjectMenu(vm: EditorViewModel, context: and
                         ) { Text("Распознать") }
                         DropdownMenu(expanded = recognizeExpanded, onDismissRequest = { recognizeExpanded = false }) {
                             DropdownMenuItem(
-                                text = { Text("Текст") }, leadingIcon = { Icon(Icons.Outlined.TextFields, null) },
+                                text = { Text("Текст · ${vm.currentBoard?.languageTag ?: "ru-RU"}") }, leadingIcon = { Icon(Icons.Outlined.TextFields, null) },
                                 onClick = { recognizeExpanded = false; vm.recognize(context, RecognitionMode.TEXT) }
                             )
+                            DropdownMenuItem(text = { Text("Выбрать язык…") }, onClick = { recognizeExpanded = false; vm.languagePanel = true })
                             DropdownMenuItem(
                                 text = { Text("Формула") }, leadingIcon = { Icon(Icons.Outlined.Functions, null) },
                                 onClick = { recognizeExpanded = false; vm.recognize(context, RecognitionMode.MATH) }
@@ -480,6 +474,14 @@ private fun PageControls(vm: EditorViewModel, modifier: Modifier = Modifier) {
 @Composable
 private fun RecognitionStatus(vm: EditorViewModel, modifier: Modifier = Modifier) {
     val state = vm.recognition ?: return
+    if (state.result != null && state.mode == RecognitionMode.TEXT) {
+        AlertDialog(onDismissRequest = { vm.recognition = null }, title = { Text("Результат распознавания") },
+            text = { Column { state.result.candidates.ifEmpty { listOf(state.result.primary) }.take(5).forEach { candidate ->
+                TextButton(onClick = { vm.chooseRecognitionCandidate(candidate) }) { Text(candidate) }
+            } } }, confirmButton = { TextButton(onClick = vm::applyRecognition) { Text("Вставить") } },
+            dismissButton = { TextButton(onClick = { vm.recognition = null }) { Text("Отмена") } })
+        return
+    }
     if (state.error != null) {
         AlertDialog(
             onDismissRequest = { vm.recognition = null },
@@ -521,7 +523,7 @@ private fun ToolButton(icon: androidx.compose.ui.graphics.vector.ImageVector, la
         onClick = onClick,
         colors = IconButtonDefaults.iconButtonColors(
             containerColor = if (selected) InkColors.Accent else Color.Transparent,
-            contentColor = if (selected) Color.White else InkColors.Ink
+            contentColor = if (selected) MaterialTheme.colorScheme.onPrimary else InkColors.Ink
         )
     ) { Icon(icon, contentDescription = label) }
 }
@@ -532,7 +534,7 @@ private fun EraserToolButton(selected: Boolean, onClick: () -> Unit) {
         onClick = onClick,
         colors = IconButtonDefaults.iconButtonColors(
             containerColor = if (selected) InkColors.Accent else Color.Transparent,
-            contentColor = if (selected) Color.White else InkColors.Ink
+            contentColor = if (selected) MaterialTheme.colorScheme.onPrimary else InkColors.Ink
         )
     ) {
         Icon(

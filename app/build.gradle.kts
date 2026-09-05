@@ -6,10 +6,10 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
-val ciVersionCode = System.getenv("GITHUB_RUN_NUMBER")
+val ciVersionCode = 200_000 + (System.getenv("GITHUB_RUN_NUMBER")
     ?.toIntOrNull()
     ?.coerceAtLeast(2)
-    ?: 2
+    ?: 0)
 val releaseKeyPassword = "InkLabPreviewRelease2026"
 
 android {
@@ -21,9 +21,10 @@ android {
         minSdk = 24
         targetSdk = 36
         versionCode = ciVersionCode
-        versionName = "preview"
+        versionName = "2.0.0"
         vectorDrawables.useSupportLibrary = true
-        ndk.abiFilters += "arm64-v8a"
+        ndk.abiFilters += providers.gradleProperty("testAbi").getOrElse("arm64-v8a")
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
     signingConfigs {
@@ -125,4 +126,8 @@ dependencies {
     debugImplementation("androidx.compose.ui:ui-test-manifest")
 
     testImplementation("junit:junit:4.13.2")
+    androidTestImplementation("androidx.test:runner:1.7.0")
+    androidTestImplementation("androidx.test.ext:junit:1.3.0")
+    androidTestImplementation(platform("androidx.compose:compose-bom:2026.06.01"))
+    androidTestImplementation("androidx.compose.ui:ui-test-junit4")
 }

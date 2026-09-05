@@ -169,3 +169,39 @@ internal fun distanceToSegment(point: Offset, start: Offset, end: Offset): Float
     val t = max(0f, min(1f, projection))
     return (point - (start + segment * t)).getDistance()
 }
+
+/** Clip a stroke without connecting separate excursions outside the paper. */
+fun clipStrokeToPage(stroke: InkStroke, bounds: Rect): List<InkStroke> {
+    if (stroke.points.size == 1) return if (bounds.contains(stroke.points[0].offset())) listOf(stroke) else emptyList()
+    val result = mutableListOf<InkStroke>()
+    var points = mutableListOf<InkPoint>()
+    fun flush() {
+        if (points.isNotEmpty()) result += stroke.copy(id = if (result.isEmpty()) stroke.id else java.util.UUID.randomUUID().toString(), points = points.toList())
+        points = mutableListOf()
+    }
+    fun interpolate(a: InkPoint, b: InkPoint, t: Float) = a.copy(
+        x = a.x + (b.x - a.x) * t, y = a.y + (b.y - a.y) * t,
+        pressure = a.pressure + (b.pressure - a.pressure) * t,
+        tilt = a.tilt + (b.tilt - a.tilt) * t,
+        timestamp = a.timestamp + ((b.timestamp - a.timestamp) * t).toLong()
+    )
+    stroke.points.zipWithNext().forEach { (a,b) ->
+        val dx=b.x-a.x; val dy=b.y-a.y
+        val p=floatArrayOf(-dx,dx,-dy,dy)
+        val q=floatArrayOf(a.x-bounds.left,bounds.right-a.x,a.y-bounds.top,bounds.bottom-a.y)
+        var enter=0f; var leave=1f; var visible=true
+        for (i in 0..3) {
+            if (p[i]==0f) { if(q[i]<0) visible=false }
+            else { val t=q[i]/p[i]; if(p[i]<0) enter=maxOf(enter,t) else leave=minOf(leave,t) }
+        }
+        if(!visible || enter>leave) flush()
+        else {
+            val start=interpolate(a,b,enter);val end=interpolate(a,b,leave)
+            if(points.lastOrNull()?.offset()!=start.offset()) { flush(); points+=start }
+            points+=end
+            if(leave<1f) flush()
+        }
+    }
+    flush()
+    return result
+}
