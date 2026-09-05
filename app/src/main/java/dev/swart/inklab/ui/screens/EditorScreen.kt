@@ -24,6 +24,10 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.ui.draw.clipToBounds
+import androidx.activity.compose.BackHandler
+import android.widget.Toast
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -80,6 +84,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
@@ -87,6 +92,8 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.contentDescription
 import dev.swart.inklab.R
 import dev.swart.inklab.core.model.ConvertedInkKind
 import dev.swart.inklab.core.model.DocumentFormat
@@ -108,6 +115,7 @@ fun EditorScreen(vm: EditorViewModel) {
     val drawerState = androidx.compose.material3.rememberDrawerState(DrawerValue.Closed)
     val scope = rememberCoroutineScope()
     val board = vm.currentBoard
+    BackHandler { vm.navigate(AppScreen.BOARDS) }
 
     ModalNavigationDrawer(
         drawerState = drawerState,
@@ -116,33 +124,37 @@ fun EditorScreen(vm: EditorViewModel) {
     ) {
         Box(Modifier.fillMaxSize().background(InkColors.Paper)) {
             Column(Modifier.fillMaxSize()) {
-                if (!vm.fullScreen) TopBar(vm, onMenu = { scope.launch { drawerState.open() } })
-                if (!vm.fullScreen) {
-                    Row(Modifier.fillMaxWidth().background(InkColors.PaperRaised), verticalAlignment = Alignment.CenterVertically) {
-                        ToolDock(vm, Modifier.weight(1f))
-                        IconButton(onClick = { vm.pagePanel = !vm.pagePanel }) { Icon(Icons.Outlined.NoteAlt, "Страницы") }
+                TopBar(vm, onMenu = { scope.launch { drawerState.open() } })
+                Box(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp), contentAlignment = Alignment.Center) {
+                    ToolDock(vm, Modifier.widthIn(max = 840.dp).fillMaxWidth())
+                }
+                Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = 16.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.End) {
+                    IconButton(onClick = vm::undo) { Icon(Icons.Outlined.Undo, "Отменить") }
+                    IconButton(onClick = vm::redo) { Icon(Icons.Outlined.Redo, "Повторить") }
+                    Spacer(Modifier.weight(1f))
+                    Text("${(vm.viewportScale * 100).roundToInt()}%", color = InkColors.Muted)
+                    if (board?.format == DocumentFormat.NOTEBOOK) {
+                        TextButton(onClick = vm::resetViewport) { Text("По ширине") }
+                        TextButton(onClick = vm::fitPage) { Text("Лист целиком") }
+                    } else {
+                        TextButton(onClick = vm::resetViewport) { Text("Исходный вид") }
                     }
                 }
                 BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
-                    val wideWorkspace = maxWidth >= 900.dp
-                    Row(Modifier.fillMaxSize()) {
-                        if (wideWorkspace && vm.pagePanel && !vm.fullScreen) InlinePageRail(vm)
-                        BoxWithConstraints(Modifier.weight(1f).fillMaxHeight()) {
-                            val showPageCount = maxWidth > 600.dp
-                            EditorCanvas(vm, Modifier.fillMaxSize())
-                            ObjectMenu(vm, context)
-                            Row(Modifier.align(Alignment.BottomEnd).padding(12.dp).horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                if (showPageCount) AssistChip(onClick = { vm.pagePanel = !vm.pagePanel }, label = { Text("Лист ${vm.currentPageIndex + 1} / ${board?.pages?.size ?: 1}") })
-                                AssistChip(onClick = vm::resetViewport, label = { Text("По ширине") })
-                                AssistChip(onClick = vm::fitPage, label = { Text("Лист целиком") })
-                                AssistChip(onClick = { vm.fullScreen = !vm.fullScreen }, label = { Text(if (vm.fullScreen) "Панели" else "Фокус") })
+                    val wideWorkspace = maxWidth >= 600.dp
+                    Column(Modifier.fillMaxSize()) {
+                        if (!wideWorkspace && board?.format == DocumentFormat.NOTEBOOK) CompactPageStrip(vm)
+                        Row(Modifier.fillMaxSize()) {
+                            if (wideWorkspace && board?.format == DocumentFormat.NOTEBOOK) InlinePageRail(vm)
+                            BoxWithConstraints(Modifier.weight(1f).fillMaxHeight().clipToBounds()) {
+                                EditorCanvas(vm, Modifier.fillMaxSize())
+                                ObjectMenu(vm, context)
                             }
                         }
                     }
                 }
             }
             RecognitionStatus(vm, Modifier.align(Alignment.TopCenter).padding(top = 76.dp).zIndex(10f))
-            WorkspaceDialogs(vm)
 
             vm.editingConvertedObject?.let { EditConvertedDialog(vm, it.kind, it.content) }
         }
@@ -160,7 +172,7 @@ private fun EditorDrawer(vm: EditorViewModel, close: () -> Unit) {
                 Text("InkLab", modifier = Modifier.padding(start = 12.dp), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
             }
             NavigationDrawerItem(
-                label = { Text("Все файлы") }, selected = false,
+                label = { Text("Библиотека") }, selected = false,
                 icon = { Icon(Icons.Outlined.NoteAlt, null) },
                 onClick = { close(); vm.navigate(AppScreen.BOARDS) }
             )
@@ -187,7 +199,7 @@ private fun TopBar(vm: EditorViewModel, onMenu: () -> Unit) {
     var paperMenu by remember { mutableStateOf(false) }
     var renameDialog by remember(vm.currentBoardId) { mutableStateOf(false) }
     val board = vm.currentBoard
-    Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+    Row(Modifier.fillMaxWidth().testTag("documentToolbar").padding(horizontal = 20.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
         IconButton(onClick = onMenu) { Icon(Icons.Outlined.Menu, "Меню") }
         Column(Modifier.weight(1f).padding(start = 8.dp).clickable(enabled = board != null) { renameDialog = true }) {
             Text(board?.title ?: "InkLab", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold,
@@ -196,9 +208,7 @@ private fun TopBar(vm: EditorViewModel, onMenu: () -> Unit) {
                 color = InkColors.Muted, style = MaterialTheme.typography.labelSmall, maxLines = 1)
         }
         IconButton(onClick = { vm.audioPanel = true }) { Icon(Icons.Outlined.Mic, "Диктофон", tint = if (dev.swart.inklab.audio.AudioHub.activeId != null) MaterialTheme.colorScheme.error else InkColors.Ink) }
-        IconButton(onClick = { vm.libraryTools = true }) { Icon(Icons.Outlined.MoreVert, "Действия с документом") }
-        IconButton(onClick = vm::undo) { Icon(Icons.Outlined.Undo, "Отменить") }
-        IconButton(onClick = vm::redo) { Icon(Icons.Outlined.Redo, "Повторить") }
+        IconButton(onClick = { vm.documentActions = true }) { Icon(Icons.Outlined.MoreVert, "Действия с документом") }
         Box {
             IconButton(onClick = { paperMenu = true }, modifier = Modifier.background(InkColors.PaperRaised, CircleShape)) {
                 Icon(Icons.Outlined.Tune, "Быстрые настройки бумаги")
@@ -255,11 +265,12 @@ private fun PaperMenu(vm: EditorViewModel, expanded: Boolean, dismiss: () -> Uni
 
 @Composable
 private fun ToolDock(vm: EditorViewModel, modifier: Modifier = Modifier) {
+    val context = LocalContext.current
     var optionsFor by remember { mutableStateOf<EditorTool?>(null) }
     var editingColorSlot by remember { mutableStateOf<Int?>(null) }
     Box(modifier) {
-        GlassPanel {
-            Row(Modifier.horizontalScroll(rememberScrollState()), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+        GlassPanel(Modifier.fillMaxWidth()) {
+            Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceEvenly) {
                 ToolButton(Icons.Outlined.Draw, "Перо", vm.tool == EditorTool.PEN) {
                     if (vm.tool == EditorTool.PEN) optionsFor = EditorTool.PEN else vm.tool = EditorTool.PEN
                 }
@@ -272,10 +283,11 @@ private fun ToolDock(vm: EditorViewModel, modifier: Modifier = Modifier) {
                 Box(Modifier.padding(horizontal = 6.dp).size(width = 1.dp, height = 30.dp).background(InkColors.Line))
                 vm.inputPreferences.quickPenColors.forEachIndexed { index, color ->
                     QuickColorDot(
-                        color = Color(color),
-                        selected = vm.tool == EditorTool.PEN && vm.penColor == Color(color),
+                        color = if (index == 0) InkColors.Ink else Color(color),
+                        label = if(index == 0) "Основной цвет" else "Быстрый цвет ${index + 1}",
+                        selected = vm.tool == EditorTool.PEN && vm.penColor == Color(if (index == 0) 0xFF25272C.toInt() else color),
                         onTap = { vm.chooseQuickPenColor(index) },
-                        onLongPress = { editingColorSlot = index }
+                        onLongPress = { if (index == 0) Toast.makeText(context, "Основной цвет следует теме и не изменяется", Toast.LENGTH_SHORT).show() else editingColorSlot = index }
                     )
                 }
                 IconButton(onClick = { optionsFor = vm.tool }) {
@@ -302,18 +314,18 @@ private fun ToolDock(vm: EditorViewModel, modifier: Modifier = Modifier) {
 }
 
 @Composable
-private fun QuickColorDot(color: Color, selected: Boolean, onTap: () -> Unit, onLongPress: () -> Unit) {
+private fun QuickColorDot(color: Color, label: String, selected: Boolean, onTap: () -> Unit, onLongPress: () -> Unit) {
+    Box(Modifier.size(48.dp).semantics { contentDescription = label }.pointerInput(color, selected) {
+        detectTapGestures(onTap = { onTap() }, onLongPress = { onLongPress() })
+    }, contentAlignment = Alignment.Center) {
     Surface(
         modifier = Modifier
-            .padding(horizontal = 3.dp)
-            .size(27.dp)
-            .pointerInput(color) {
-                detectTapGestures(onTap = { onTap() }, onLongPress = { onLongPress() })
-            },
+            .size(30.dp),
         shape = CircleShape,
         color = color,
         border = if (selected) BorderStroke(3.dp, InkColors.Accent) else BorderStroke(1.dp, InkColors.Line)
     ) {}
+    }
 }
 
 @Composable
@@ -358,7 +370,10 @@ private fun PenOptions(vm: EditorViewModel) {
     Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Text("Перо", fontWeight = FontWeight.SemiBold)
         Row(horizontalArrangement = Arrangement.spacedBy(9.dp)) {
-            penPalette.forEach { ColorDot(it, vm.penColor, 28.dp) { vm.choosePenColor(it) } }
+            penPalette.forEachIndexed { index, color ->
+                val display = if(index == 0) InkColors.Ink else color
+                ColorDot(display, if(vm.penColor == color) display else Color.Transparent, 28.dp) { vm.choosePenColor(color) }
+            }
         }
         Text("Толщина · ${vm.penWidth.toInt()}", color = InkColors.Muted, style = MaterialTheme.typography.bodySmall)
         Slider(vm.penWidth, { vm.penWidth = it }, valueRange = 2f..12f, steps = 9)

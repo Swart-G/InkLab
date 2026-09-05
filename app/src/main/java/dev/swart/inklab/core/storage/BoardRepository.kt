@@ -362,6 +362,7 @@ class InputPreferencesRepository(context: Context) {
             ?.split(',')
             ?.mapNotNull { token -> token.toLongOrNull(16)?.toInt() }
             ?.takeIf { it.size == 4 }
+            ?.mapIndexed { index, color -> if(index == 0) 0xFF25272C.toInt() else color }
             ?: defaultQuickPenColors,
         darkTheme = preferences.getBoolean("darkTheme", false),
         systemTheme = preferences.getBoolean("systemTheme", false),

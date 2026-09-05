@@ -68,24 +68,27 @@ fun WorkspaceDialogs(vm: EditorViewModel) {
             "Восстановлено документов: ${imported.boards.size}. Они добавлены как копии."
         }
     }
-    if(vm.libraryTools) Sheet("Документ и библиотека",{ vm.libraryTools=false }) {
+    if(vm.documentActions) Sheet("Документ",{ vm.documentActions=false }) {
         val board=vm.currentBoard
         if(board!=null) {
-            Action("Языки распознавания · ${Locale.forLanguageTag(board.languageTag).getDisplayName(Locale.forLanguageTag("ru"))}") { vm.libraryTools=false; vm.languagePanel=true }
-            Action("Диктофон и записи лекций") { vm.libraryTools=false; vm.audioPanel=true }
+            Action("Языки распознавания · ${Locale.forLanguageTag(board.languageTag).getDisplayName(Locale.forLanguageTag("ru"))}") { vm.documentActions=false; vm.languagePanel=true }
             Action(if(board.favorite) "Убрать из избранного" else "Добавить в избранное") { vm.toggleFavorite(board.id) }
             Text("Переместить в папку",style=MaterialTheme.typography.labelLarge)
             Row(Modifier.horizontalScroll(rememberScrollState())) {
                 TextButton(onClick={vm.moveDocument(board.id,null)}) { Text("Все файлы") }
                 vm.folders.forEach { folder -> TextButton(onClick={vm.moveDocument(board.id,folder.id)}) { Text(folder.title) } }
             }
-            Action("Экспорт всей тетради в PDF") { exportingBoard=vm.allDocuments().first { it.id==board.id }; exportIndices=board.pages.indices.toList(); pdf.launch("${board.title}.pdf") }
-            Action("Экспорт текущей страницы в PDF") { exportingBoard=vm.allDocuments().first { it.id==board.id }; exportIndices=listOf(vm.currentPageIndex); pdf.launch("${board.title}-${vm.currentPageIndex+1}.pdf") }
+            Action("Экспорт документа в PDF") { exportingBoard=vm.allDocuments().first { it.id==board.id }; exportIndices=board.pages.indices.toList(); pdf.launch("${board.title}.pdf") }
+            if(board.format == DocumentFormat.NOTEBOOK) Action("Экспорт текущей страницы в PDF") { exportingBoard=vm.allDocuments().first { it.id==board.id }; exportIndices=listOf(vm.currentPageIndex); pdf.launch("${board.title}-${vm.currentPageIndex+1}.pdf") }
         }
-        HorizontalDivider()
+    }
+    if(vm.libraryTools) Sheet("Резервные копии",{ vm.libraryTools=false }) {
         Action("Сохранить резервную копию с аудио") { backup.launch("InkLab-backup.zip") }
         Action("Восстановить из резервной копии") { restore.launch(arrayOf("application/zip","application/octet-stream")) }
+    }
+    if(vm.trashPanel) Sheet("Корзина",{ vm.trashPanel=false }) {
         val deleted=vm.boards.filter { it.deletedAt!=null }
+        val pageTrash=vm.boards.filter { it.deletedAt == null && it.trashedPages.isNotEmpty() }
         Text("Корзина · ${deleted.size}",style=MaterialTheme.typography.titleMedium)
         deleted.forEach { item ->
             Text(item.title)
@@ -94,13 +97,16 @@ fun WorkspaceDialogs(vm: EditorViewModel) {
                 TextButton(onClick={ message="Удалить навсегда: ${item.title}"; pendingDeletion=item.id }) { Text("Удалить навсегда") }
             }
         }
-        board?.trashedPages?.forEachIndexed { index,page ->
-            Row { TextButton(onClick={vm.restorePage(page.id)}) {Text("Восстановить лист ${index+1}")}; TextButton(onClick={message="Удалить лист навсегда?";pendingDeletion="page:${page.id}"}) {Text("Удалить")} }
+        pageTrash.forEach { document ->
+            Text(document.title, style=MaterialTheme.typography.titleSmall)
+            document.trashedPages.forEachIndexed { index,page ->
+                Row { TextButton(onClick={vm.restorePage(page.id)}) {Text("Восстановить лист ${index+1}")}; TextButton(onClick={message="Удалить лист навсегда?";pendingDeletion="page:${page.id}"}) {Text("Удалить")} }
+            }
         }
         if(deleted.isNotEmpty() || vm.boards.any {it.trashedPages.isNotEmpty()}) Action("Очистить корзину") {message="Удалить все документы и страницы из корзины навсегда?";pendingDeletion="all"}
-        if(deleted.isEmpty() && board?.trashedPages?.isEmpty()!=false) Text("Корзина пуста",color=InkColors.Muted)
+        if(deleted.isEmpty() && pageTrash.isEmpty()) Text("Корзина пуста",color=InkColors.Muted)
     }
-    if(vm.pageManager || (vm.pagePanel && androidx.compose.ui.platform.LocalConfiguration.current.screenWidthDp < 900)) PagePanel(vm)
+    if(vm.pageManager && vm.currentBoard?.format == DocumentFormat.NOTEBOOK) PagePanel(vm)
     if(vm.languagePanel) LanguagesPanel(vm)
     if(vm.audioPanel) AudioPanel(vm)
     if(busy) AlertDialog(onDismissRequest={},title={ Text("Выполняется…") },text={ CircularProgressIndicator() },confirmButton={})
@@ -135,16 +141,16 @@ internal fun Sheet(title: String, close: () -> Unit, scrollable: Boolean = true,
 private fun PagePanel(vm: EditorViewModel) {
     val board=vm.currentBoard ?: return
     val rowHeight=with(LocalDensity.current) { 144.dp.toPx() }
-    var selected by remember { mutableStateOf<Set<Int>>(emptySet()) }
+    var selected by remember(board.id) { mutableStateOf<Set<String>>(emptySet()) }
     val context=LocalContext.current; val scope=rememberCoroutineScope()
     var exportBoard by remember { mutableStateOf<InkBoard?>(null) }; var indices by remember { mutableStateOf<List<Int>>(emptyList()) }; var error by remember { mutableStateOf<String?>(null) }
     val export=rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/pdf")) { uri ->
         val source=exportBoard
         if(uri!=null && source!=null) scope.launch { error=runCatching { withContext(Dispatchers.IO) { DocumentTransfer(context).pdf(source,indices,uri) }; "PDF сохранён" }.getOrElse { it.message } }
     }
-    Dialog(onDismissRequest={vm.pagePanel=false;vm.pageManager=false}) {
+    Dialog(onDismissRequest={vm.pageManager=false}) {
         Surface(shape=MaterialTheme.shapes.large) { Column(Modifier.fillMaxWidth().heightIn(max=700.dp).padding(16.dp)) {
-            Row { Text("Страницы · ${board.pages.size}",Modifier.weight(1f),style=MaterialTheme.typography.titleLarge); TextButton(onClick={vm.pagePanel=false;vm.pageManager=false}) {Text("Готово")} }
+            Row { Text("Страницы · ${board.pages.size}",Modifier.weight(1f),style=MaterialTheme.typography.titleLarge); TextButton(onClick={vm.pageManager=false}) {Text("Готово")} }
             Row(Modifier.horizontalScroll(rememberScrollState())) {
                 TextButton(onClick=vm::addPage) {Text("+ Лист")}; TextButton(onClick=vm::duplicatePage) {Text("Копия")}; TextButton(onClick=vm::deleteCurrentPage) {Text("В корзину")}
             }
@@ -153,9 +159,9 @@ private fun PagePanel(vm: EditorViewModel) {
                 itemsIndexed(board.pages,key={_,p->p.id}) { index,page ->
                     val currentIndex by rememberUpdatedState(index)
                     Row(Modifier.fillMaxWidth().height(144.dp).background(if(index==vm.currentPageIndex) InkColors.AccentSoft else Color.Transparent),verticalAlignment=Alignment.CenterVertically) {
-                        Checkbox(index in selected,{ selected=if(it) selected+index else selected-index })
+                        Checkbox(page.id in selected,{ selected=if(it) selected+page.id else selected-page.id })
                         PageThumbnail(page,board.settings,Modifier.width(72.dp).height(110.dp).clickable { vm.openPage(index) })
-                        Column(Modifier.weight(1f).padding(8.dp)) { Text("Лист ${index+1}"); TextButton(onClick={vm.openPage(index);vm.pagePanel=false;vm.pageManager=false}) {Text("Открыть")} }
+                        Column(Modifier.weight(1f).padding(8.dp)) { Text("Лист ${index+1}"); TextButton(onClick={vm.openPage(index);vm.pageManager=false}) {Text("Открыть")} }
                         Text("≡",Modifier.padding(12.dp).pointerInput(page.id) {
                             var distance=0f
                             detectDragGesturesAfterLongPress(onDragStart={vm.activatePage(currentIndex);distance=0f},onDrag={change,delta ->
@@ -166,7 +172,8 @@ private fun PagePanel(vm: EditorViewModel) {
                     }
                 }
             }
-            if(selected.isNotEmpty()) TextButton(onClick={exportBoard=vm.allDocuments().first {it.id==board.id}; indices=selected.filter {it in board.pages.indices}.sorted();export.launch("${board.title}-страницы.pdf")}) {Text("Экспортировать выбранные (${selected.size})")}
+            val selectedIndices = board.pages.indices.filter { board.pages[it].id in selected }
+            if(selectedIndices.isNotEmpty()) TextButton(onClick={exportBoard=vm.allDocuments().first {it.id==board.id}; indices=selectedIndices;export.launch("${board.title}-страницы.pdf")}) {Text("Экспортировать выбранные (${selectedIndices.size})")}
             error?.let {Text(it)}
         } }
     }
@@ -187,7 +194,14 @@ internal fun PageThumbnail(page: InkPage, settings: BoardSettings, modifier: Mod
         }
     }
     Canvas(modifier) {
-        drawContext.canvas.nativeCanvas.drawBitmap(bitmap, null, android.graphics.RectF(0f,0f,size.width,size.height),android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG))
+        val scale = minOf(size.width / page.width, size.height / page.height)
+        val width = page.width * scale
+        val height = page.height * scale
+        val left = (size.width - width) / 2
+        val top = (size.height - height) / 2
+        val bitmapScale = minOf(160f / page.width, 226f / page.height)
+        val source = android.graphics.Rect(0, 0, (page.width * bitmapScale).toInt().coerceIn(1,160), (page.height * bitmapScale).toInt().coerceIn(1,226))
+        drawContext.canvas.nativeCanvas.drawBitmap(bitmap, source, android.graphics.RectF(left,top,left+width,top+height),android.graphics.Paint(android.graphics.Paint.FILTER_BITMAP_FLAG))
     }
 }
 
@@ -217,7 +231,7 @@ internal fun LanguagesPanel(vm: EditorViewModel) {
                 if(loading) { LinearProgressIndicator(Modifier.fillMaxWidth()); Text("Выполняется… При загрузке только по Wi-Fi ожидается подходящая сеть.",style=MaterialTheme.typography.bodySmall); if(vm.inputPreferences.wifiOnlyModels) TextButton(onClick={vm.prepareProvider(context,provider.id,false)}) {Text("Разрешить текущую сеть")} }
                 else Row {
                     if(ready) {
-                        TextButton(onClick={vm.setLanguage(tag)}) {Text(if(vm.currentBoard?.languageTag?.let {AppContainer.recognitionRegistry.language(it).id}==provider.id) "✓ Выбран" else "Выбрать")}
+                        if(vm.screen == dev.swart.inklab.ui.AppScreen.EDITOR) TextButton(onClick={vm.setLanguage(tag)}) {Text(if(vm.currentBoard?.languageTag?.let {AppContainer.recognitionRegistry.language(it).id}==provider.id) "✓ Выбран" else "Выбрать")}
                         TextButton(onClick={vm.removeProvider(context,provider.id)}) {Text("Удалить")}
                     } else TextButton(onClick={vm.prepareProvider(context,provider.id)}) {Text("Загрузить")}
                 }
@@ -232,12 +246,16 @@ internal fun LanguagesPanel(vm: EditorViewModel) {
 @Composable
 internal fun InlinePageRail(vm: EditorViewModel) {
     val board = vm.currentBoard ?: return
+    val listState = androidx.compose.foundation.lazy.rememberLazyListState()
+    LaunchedEffect(vm.currentPageIndex, board.id) {
+        if(listState.layoutInfo.visibleItemsInfo.none {it.index == vm.currentPageIndex}) listState.animateScrollToItem(vm.currentPageIndex)
+    }
     Surface(Modifier.width(184.dp).fillMaxHeight(), color = InkColors.PaperRaised) {
         Column(Modifier.padding(10.dp)) {
-            Row { Text("Страницы", Modifier.weight(1f), style = MaterialTheme.typography.titleMedium); TextButton(onClick = {vm.pagePanel=false}) {Text("×")} }
+            Text("Страницы", style = MaterialTheme.typography.titleMedium)
             TextButton(onClick={vm.pageManager=true}) {Text("Управление")}
             Row { TextButton(onClick=vm::addPage) {Text("+ Лист")}; TextButton(onClick=vm::duplicatePage) {Text("Копия")} }
-            LazyColumn(Modifier.weight(1f)) {
+            LazyColumn(Modifier.weight(1f), state=listState) {
                 itemsIndexed(board.pages, key={_,p->p.id}) { index,page ->
                     Column(Modifier.fillMaxWidth().background(if(index==vm.currentPageIndex) InkColors.AccentSoft else Color.Transparent).clickable {vm.openPage(index)}.padding(10.dp), horizontalAlignment=Alignment.CenterHorizontally) {
                         PageThumbnail(page,board.settings,Modifier.width(112.dp).height(158.dp))
@@ -249,6 +267,27 @@ internal fun InlinePageRail(vm: EditorViewModel) {
                 IconButton(onClick={vm.movePage(-1)},enabled=vm.currentPageIndex>0) {Icon(Icons.Outlined.ArrowUpward,"Переместить лист выше")}
                 IconButton(onClick={vm.movePage(1)},enabled=vm.currentPageIndex<board.pages.lastIndex) {Icon(Icons.Outlined.ArrowDownward,"Переместить лист ниже")}
                 IconButton(onClick=vm::deleteCurrentPage) {Icon(Icons.Outlined.DeleteOutline,"Удалить лист")}
+            }
+        }
+    }
+}
+
+@Composable
+internal fun CompactPageStrip(vm: EditorViewModel) {
+    val board = vm.currentBoard ?: return
+    Surface(color = InkColors.PaperRaised) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            androidx.compose.foundation.lazy.LazyRow(Modifier.weight(1f), contentPadding = PaddingValues(8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                itemsIndexed(board.pages, key = { _, page -> page.id }) { index, page ->
+                    Column(Modifier.background(if(index == vm.currentPageIndex) InkColors.AccentSoft else Color.Transparent).clickable { vm.openPage(index) }.padding(6.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                        PageThumbnail(page, board.settings, Modifier.width(36.dp).height(50.dp))
+                        Text("Лист ${index + 1}", style = MaterialTheme.typography.labelSmall)
+                    }
+                }
+            }
+            Column {
+                TextButton(onClick = vm::addPage) { Text("+ Лист") }
+                TextButton(onClick = { vm.pageManager = true }) { Text("Управление") }
             }
         }
     }

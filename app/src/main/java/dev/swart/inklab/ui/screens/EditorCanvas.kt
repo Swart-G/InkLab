@@ -12,6 +12,7 @@ import dev.swart.inklab.core.input.CanvasInputController
 import android.graphics.Paint
 import android.graphics.Typeface
 import androidx.compose.foundation.Canvas
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.calculateCentroid
@@ -107,6 +108,7 @@ fun EditorCanvas(vm: EditorViewModel, modifier: Modifier = Modifier) {
 
     Canvas(
         modifier = modifier
+            .clipToBounds()
             .background(if (notebook) palette.Paper else paperColor)
             .onSizeChanged { vm.resizeViewport(it.width.toFloat(), it.height.toFloat()) }
             .motionEventSpy { event ->

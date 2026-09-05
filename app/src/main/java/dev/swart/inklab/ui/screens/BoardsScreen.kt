@@ -30,6 +30,7 @@ import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.NoteAlt
+import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -65,9 +66,10 @@ import java.text.DateFormat
 import java.util.Date
 
 @Composable
-fun BoardsScreen(vm: EditorViewModel, onBack: () -> Unit) {
+fun BoardsScreen(vm: EditorViewModel) {
     var currentFolderId by rememberSaveable { mutableStateOf<String?>(null) }
     var createMenu by remember { mutableStateOf(false) }
+    var libraryMenu by remember { mutableStateOf(false) }
     var creatingFormat by remember { mutableStateOf<DocumentFormat?>(null) }
     var creatingFolder by remember { mutableStateOf(false) }
 
@@ -77,7 +79,7 @@ fun BoardsScreen(vm: EditorViewModel, onBack: () -> Unit) {
     val currentFolder = currentFolderId?.let { id -> vm.folders.firstOrNull { it.id == id } }
     val visibleFolders = vm.folders.filter { it.parentId == currentFolderId && query.isBlank() && !favoritesOnly }.sortedByDescending { it.updatedAt }
     val visibleBoards = vm.boards.filter {
-        it.deletedAt == null && (query.isNotBlank() || it.folderId == currentFolderId) && (!favoritesOnly || it.favorite) &&
+        it.deletedAt == null && (query.isNotBlank() || favoritesOnly || it.folderId == currentFolderId) && (!favoritesOnly || it.favorite) &&
             (query.isBlank() || it.title.contains(query,true) || it.subject.contains(query,true) || it.pages.any { page -> page.convertedObjects.any { item -> item.content.contains(query,true) } })
     }.let { if(sortByName) it.sortedBy { it.title.lowercase() } else it.sortedByDescending { it.updatedAt } }
     val breadcrumb = generateSequence(currentFolder) { folder ->
@@ -87,12 +89,10 @@ fun BoardsScreen(vm: EditorViewModel, onBack: () -> Unit) {
     fun goBack() {
         if (currentFolder != null) {
             currentFolderId = currentFolder.parentId
-        } else if (vm.currentBoard != null) {
-            onBack()
         }
     }
 
-    val canGoBack = currentFolder != null || vm.currentBoard != null
+    val canGoBack = currentFolder != null
     BackHandler(enabled = canGoBack) { goBack() }
 
     Box(Modifier.fillMaxSize().background(InkColors.Paper)) {
@@ -101,17 +101,23 @@ fun BoardsScreen(vm: EditorViewModel, onBack: () -> Unit) {
                 if (canGoBack) {
                     IconButton(onClick = ::goBack) { Icon(Icons.Outlined.ArrowBack, "Назад") }
                 }
-                Column(Modifier.padding(start = if (canGoBack) 8.dp else 0.dp)) {
-                    Text("Файлы", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.SemiBold)
+                Column(Modifier.weight(1f).padding(start = if (canGoBack) 8.dp else 0.dp)) {
+                    Text("Библиотека", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.SemiBold)
                     if (breadcrumb.isNotEmpty()) Text(breadcrumb, color = InkColors.Muted, style = MaterialTheme.typography.bodySmall)
+                }
+                IconButton(onClick = { vm.navigate(dev.swart.inklab.ui.AppScreen.SETTINGS) }) { Icon(Icons.Outlined.Settings, "Настройки") }
+                Box {
+                    IconButton(onClick = { libraryMenu = true }) { Icon(Icons.Outlined.MoreVert, "Действия библиотеки") }
+                    DropdownMenu(expanded = libraryMenu, onDismissRequest = { libraryMenu = false }) {
+                        DropdownMenuItem(text = { Text("Резервные копии") }, onClick = { libraryMenu = false; vm.libraryTools = true })
+                        DropdownMenuItem(text = { Text("Корзина") }, onClick = { libraryMenu = false; vm.trashPanel = true })
+                    }
                 }
             }
             OutlinedTextField(query,{query=it},label={Text("Поиск по названиям и распознанному тексту")},singleLine=true,modifier=Modifier.fillMaxWidth())
             Row(Modifier.horizontalScroll(rememberScrollState())) {
                 TextButton(onClick={favoritesOnly=!favoritesOnly}) {Text(if(favoritesOnly) "★ Избранное" else "☆ Избранное")}
                 TextButton(onClick={sortByName=!sortByName}) {Text(if(sortByName) "По имени" else "По изменению")}
-                TextButton(onClick={vm.libraryTools=true}) {Text("Копии и корзина")}
-                TextButton(onClick={vm.navigate(dev.swart.inklab.ui.AppScreen.SETTINGS)}) {Text("Настройки")}
             }
             Spacer(Modifier.height(12.dp))
 
@@ -134,7 +140,7 @@ fun BoardsScreen(vm: EditorViewModel, onBack: () -> Unit) {
                     items(visibleFolders, key = { "folder:${it.id}" }) { folder ->
                         FolderCard(
                             folder = folder,
-                            itemCount = vm.folders.count { it.parentId == folder.id } + vm.boards.count { it.folderId == folder.id },
+                            itemCount = vm.folders.count { it.parentId == folder.id } + vm.boards.count { it.folderId == folder.id && it.deletedAt == null },
                             onOpen = { currentFolderId = folder.id },
                             onRename = { vm.renameFolder(folder.id, it) },
                             onDelete = { vm.deleteFolder(folder.id) }
@@ -228,7 +234,7 @@ private fun BoardCard(
                     board.pages.firstOrNull()?.let { PageThumbnail(it, board.settings, Modifier.fillMaxSize()) }
                 }
             }
-            Text("${board.pages.size} стр. · $strokeCount штрихов", style = MaterialTheme.typography.bodySmall, color = InkColors.Muted)
+            Text(if(board.format == DocumentFormat.NOTEBOOK) "${board.pages.size} стр. · $strokeCount штрихов" else "Бесконечная доска · $strokeCount штрихов", style = MaterialTheme.typography.bodySmall, color = InkColors.Muted)
 
             Spacer(Modifier.height(14.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
@@ -267,7 +273,7 @@ private fun BoardCard(
     if (delete) AlertDialog(
         onDismissRequest = { delete = false },
         title = { Text("Удалить файл?") },
-        text = { Text("«${board.title}» будет удалён без возможности восстановления.") },
+        text = { Text("«${board.title}» будет перемещён в корзину. Его можно восстановить из меню библиотеки.") },
         confirmButton = { TextButton(onClick = { delete = false; onDelete() }) { Text("Удалить") } },
         dismissButton = { TextButton(onClick = { delete = false }) { Text("Отмена") } }
     )

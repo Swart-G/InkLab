@@ -34,6 +34,41 @@ class RepositoryAndEditorTest {
     private fun vm():EditorViewModel=EditorViewModel(app).also { val store=ViewModelStore();store.put("vm",it);stores+=store }
     private fun stroke()=InkStroke(points=listOf(InkPoint(100f,100f,1),InkPoint(160f,100f,2)))
 
+    @Test fun libraryNavigationAndLockedPrimaryColor()=main {
+        val vm=vm()
+        assertEquals(AppScreen.BOARDS, vm.screen)
+        vm.navigate(AppScreen.SETTINGS)
+        assertEquals(AppScreen.BOARDS, vm.settingsOrigin)
+        vm.chooseQuickPenColor(0)
+        val primary=vm.penColor
+        vm.updateQuickPenColor(0, androidx.compose.ui.graphics.Color.Red)
+        assertEquals(primary,vm.penColor)
+        vm.updateInputPreferences(vm.inputPreferences.copy(darkTheme=true))
+        assertEquals(primary,vm.penColor)
+        vm.createBoard()
+        val boardId=vm.currentBoardId
+        vm.addPage()
+        assertEquals(1,vm.currentBoard!!.pages.size)
+        vm.navigate(AppScreen.BOARDS)
+        vm.deleteBoard(boardId)
+        assertEquals(AppScreen.BOARDS,vm.screen)
+    }
+
+    @Test fun pageTrashCanRestoreAnotherNotebookWithoutOpeningIt()=main {
+        val vm=vm()
+        val notebook=vm.currentBoardId
+        val page=vm.currentBoard!!.pages.first()
+        vm.deleteCurrentPage()
+        vm.createBoard()
+        val board=vm.currentBoardId
+        vm.navigate(AppScreen.BOARDS)
+        vm.restorePage(page.id)
+        assertEquals(board,vm.currentBoardId)
+        assertEquals(AppScreen.BOARDS,vm.screen)
+        assertTrue(vm.boards.first {it.id==notebook}.pages.any {it.id==page.id})
+        assertTrue(vm.boards.first {it.id==notebook}.trashedPages.isEmpty())
+    }
+
     @Test fun legacyMigrationPreservesCoordinatesAndBackup() {
         val source="""[{"id":"legacy","title":"old","format":"NOTEBOOK","pages":[{"id":"page","strokes":[{"points":[[-50,20,1],[2500,2800,2]]}]}]}]"""
         File(app.filesDir,"boards.json").writeText(source)

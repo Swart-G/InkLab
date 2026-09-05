@@ -79,10 +79,11 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     var saving by mutableStateOf(false)
     private val modelRequests = mutableMapOf<String, Int>()
     var storageError by mutableStateOf<String?>(null)
-    var fullScreen by mutableStateOf(false)
     var pageManager by mutableStateOf(false)
-    var pagePanel by mutableStateOf(false)
     var libraryTools by mutableStateOf(false)
+    var documentActions by mutableStateOf(false)
+    var trashPanel by mutableStateOf(false)
+    var settingsOrigin = AppScreen.BOARDS
     var audioPanel by mutableStateOf(false)
     var languagePanel by mutableStateOf(false)
     var viewportWidth = 1f
@@ -94,7 +95,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     private var inputUndoCount = 0
     val modelErrors = mutableStateMapOf<String, String>()
 
-    var screen by mutableStateOf(AppScreen.EDITOR)
+    var screen by mutableStateOf(AppScreen.BOARDS)
     var currentBoardId by mutableStateOf("")
         private set
     var currentPageIndex by mutableStateOf(0)
@@ -152,6 +153,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         boards += if (loaded.isEmpty() && storageError == null) listOf(InkBoard(title = "Новая тетрадь", format = DocumentFormat.NOTEBOOK)) else loaded
         boards.firstOrNull { it.deletedAt == null }?.let { openBoard(it.id, persistPrevious = false) }
             ?: run { screen = AppScreen.BOARDS }
+        screen = AppScreen.BOARDS
         viewModelScope.launch {
             for ((documents, directories) in saves) {
                 val result = kotlinx.coroutines.withContext(Dispatchers.IO) {
@@ -165,6 +167,10 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun navigate(destination: AppScreen) {
+        if (destination == AppScreen.SETTINGS) settingsOrigin = screen
+        documentActions = false
+        pageManager = false
+        audioPanel = false
         if (destination != AppScreen.EDITOR) persistCurrentBoard()
         screen = destination
     }
@@ -222,6 +228,10 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun openBoard(id: String, persistPrevious: Boolean = true) {
+        if (boards.none { it.id == id && it.deletedAt == null }) return
+        documentActions = false
+        pageManager = false
+        audioPanel = false
         if (id == currentBoardId) {
             screen = AppScreen.EDITOR
             return
@@ -248,6 +258,8 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun deleteBoard(id: String) {
+        val origin = screen
+        if (id == currentBoardId) persistCurrentBoard()
         val wasCurrent = id == currentBoardId
         val index = boards.indexOfFirst { it.id == id }
         if (index >= 0) boards[index] = boards[index].copy(deletedAt = System.currentTimeMillis())
@@ -262,6 +274,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 screen = AppScreen.BOARDS
             }
         }
+        if (origin != AppScreen.EDITOR) screen = origin
         scheduleSave()
     }
 
@@ -336,10 +349,11 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
     fun restorePage(pageId: String) {
-        val board = currentBoard ?: return
+        val board = boards.firstOrNull { it.deletedAt == null && it.trashedPages.any { page -> page.id == pageId } } ?: return
         val page = board.trashedPages.firstOrNull { it.id == pageId } ?: return
-        pushUndo()
-        replaceBoard(currentDocument().copy(pages = currentDocument().pages + page, trashedPages = board.trashedPages.filterNot { it.id == pageId }))
+        if (board.id == currentBoardId) { persistCurrentBoard(); pushUndo() }
+        val source = boards.first { it.id == board.id }
+        replaceBoard(source.copy(pages = source.pages + page, trashedPages = source.trashedPages.filterNot { it.id == pageId }))
         scheduleSave()
     }
     fun replaceBoard(board: InkBoard) {
@@ -361,7 +375,10 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         boards.firstOrNull { it.id == id }?.let { replaceBoard(it.copy(deletedAt = null)) }; scheduleSave()
     }
     fun permanentlyDelete(id: String) { boards.removeAll { it.id == id && it.deletedAt != null }; scheduleSave() }
-    fun permanentlyDeletePage(id: String) { currentBoard?.let {replaceBoard(it.copy(trashedPages=it.trashedPages.filterNot {page->page.id==id}))};scheduleSave() }
+    fun permanentlyDeletePage(id: String) {
+        boards.firstOrNull { it.trashedPages.any { page -> page.id == id } }?.let { replaceBoard(it.copy(trashedPages = it.trashedPages.filterNot { page -> page.id == id })) }
+        scheduleSave()
+    }
     fun emptyTrash() {
         boards.removeAll {it.deletedAt!=null}
         for(index in boards.indices) boards[index]=boards[index].copy(trashedPages=emptyList())
@@ -390,8 +407,8 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     fun allDocuments(): List<InkBoard> { persistCurrentBoard(); return boards.toList() }
 
     fun updateInputPreferences(value: InputPreferences) {
-        inputPreferences = value
-        inputRepository.save(value)
+        inputPreferences = value.copy(quickPenColors = value.quickPenColors.mapIndexed { index, color -> if(index == 0) 0xFF25272C.toInt() else color })
+        inputRepository.save(inputPreferences)
     }
 
     fun choosePenColor(color: Color) {
@@ -400,12 +417,13 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun chooseQuickPenColor(index: Int) {
-        val value = inputPreferences.quickPenColors.getOrNull(index) ?: return
+        val value = if (index == 0) 0xFF25272C.toInt() else inputPreferences.quickPenColors.getOrNull(index) ?: return
         choosePenColor(Color(value))
         tool = EditorTool.PEN
     }
 
     fun updateQuickPenColor(index: Int, color: Color) {
+        if (index == 0) return
         if (index !in inputPreferences.quickPenColors.indices) return
         val colors = inputPreferences.quickPenColors.toMutableList()
         colors[index] = color.toArgb()

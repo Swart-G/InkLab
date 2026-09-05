@@ -23,7 +23,7 @@ import dev.swart.inklab.ui.theme.InkColors
 @Composable
 fun InkLabApp(vm: EditorViewModel = viewModel()) {
     Box(Modifier.fillMaxSize().background(InkColors.Paper).windowInsetsPadding(WindowInsets.safeDrawing)) {
-        if (vm.screen != AppScreen.EDITOR) dev.swart.inklab.ui.screens.WorkspaceDialogs(vm)
+        dev.swart.inklab.ui.screens.WorkspaceDialogs(vm)
         AnimatedContent(
             targetState = vm.screen,
             transitionSpec = { fadeIn(tween(180)) togetherWith fadeOut(tween(140)) },
@@ -31,8 +31,8 @@ fun InkLabApp(vm: EditorViewModel = viewModel()) {
         ) { screen ->
             when (screen) {
                 AppScreen.EDITOR -> EditorScreen(vm)
-                AppScreen.BOARDS -> BoardsScreen(vm) { vm.navigate(AppScreen.EDITOR) }
-                AppScreen.SETTINGS -> SettingsScreen(vm) { vm.navigate(AppScreen.EDITOR) }
+                AppScreen.BOARDS -> BoardsScreen(vm)
+                AppScreen.SETTINGS -> SettingsScreen(vm) { vm.navigate(vm.settingsOrigin) }
                 AppScreen.BOARD_SETTINGS -> BoardSettingsScreen(vm) { vm.navigate(AppScreen.EDITOR) }
             }
         }

@@ -106,7 +106,7 @@ fun SettingsScreen(vm: EditorViewModel, onBack: () -> Unit) {
                 }
             }
             item { Action("Языковые пакеты распознавания") { vm.languagePanel = true } }
-            item { Action("Резервные копии и корзина") { vm.libraryTools = true } }
+            item { Action("Резервные копии") { vm.libraryTools = true } }
             item {
                 SettingsCard("Оформление", "Комфортный вид днём и вечером") {
                     SettingSwitch("Как в системе", "Автоматически выбирать тему Android", preferences.systemTheme) {
