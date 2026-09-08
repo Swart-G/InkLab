@@ -33,6 +33,7 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalContext
 import dev.swart.inklab.core.ink.autoRecognizeShape
 import dev.swart.inklab.core.input.CanvasInputController
+import dev.swart.inklab.core.model.BoardSettings
 import dev.swart.inklab.core.model.ConvertedInkKind
 import dev.swart.inklab.core.model.DocumentFormat
 import dev.swart.inklab.core.model.InkPoint
@@ -62,11 +63,11 @@ fun EditorCanvas(vm: EditorViewModel, modifier: Modifier = Modifier) {
     }
     DisposableEffect(controller) { onDispose { controller.cancel() } }
     val night = palette.dark && vm.inputPreferences.nightPaper
-    val boardSettings = vm.currentBoard?.settings
+    val boardSettings = vm.currentBoard?.settings ?: BoardSettings()
     val notebook = vm.currentBoard?.format == DocumentFormat.NOTEBOOK
-    val paperColor = paperDisplayColor(boardSettings?.paperColor?.let(::Color) ?: palette.PaperRaised, night)
-    val ruleColor = if (paperColor.red < 0.5f) Color(0xFF565860) else Color(0xFFC9C5BC)
-    fun displayInk(color: Color) = inkDisplayColor(color, paperColor, night)
+    val currentPageSettings = vm.currentBoard?.pages?.getOrNull(vm.currentPageIndex)
+        ?.resolvedPaperSettings(boardSettings) ?: boardSettings
+    val canvasPaperColor = paperDisplayColor(Color(currentPageSettings.paperColor), night)
     val mathCache = remember {
         object : LinkedHashMap<String, JLatexMathDrawable?>(32, 0.75f, true) {
             override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, JLatexMathDrawable?>?) = size > 64
@@ -106,7 +107,7 @@ fun EditorCanvas(vm: EditorViewModel, modifier: Modifier = Modifier) {
     Canvas(
         modifier = modifier
             .clipToBounds()
-            .background(if (notebook) palette.Paper else paperColor)
+            .background(if (notebook) palette.Paper else canvasPaperColor)
             .onSizeChanged { vm.resizeViewport(it.width.toFloat(), it.height.toFloat()) }
             .motionEventSpy { event ->
                 when (event.actionMasked) {
@@ -137,7 +138,11 @@ fun EditorCanvas(vm: EditorViewModel, modifier: Modifier = Modifier) {
             val worldTop = if (notebook) placement?.originY ?: page.originY else -offset.y / scale
             val worldRight = if (notebook) worldLeft + (placement?.width ?: page.width) else worldLeft + size.width / scale
             val worldBottom = if (notebook) worldTop + (placement?.height ?: page.height) else worldTop + size.height / scale
-            val spacing = (boardSettings?.spacing ?: 36f).coerceAtLeast(12f)
+            val pageSettings = page.resolvedPaperSettings(boardSettings)
+            val paperColor = paperDisplayColor(Color(pageSettings.paperColor), night)
+            val ruleColor = if (paperColor.red < 0.5f) Color(0xFF565860) else Color(0xFFC9C5BC)
+            fun displayInk(color: Color) = inkDisplayColor(color, paperColor, night)
+            val spacing = pageSettings.spacing.coerceAtLeast(12f)
             withTransform({
                 translate(offset.x, offset.y)
                 scale(scale, scale, pivot = Offset.Zero)
@@ -156,7 +161,7 @@ fun EditorCanvas(vm: EditorViewModel, modifier: Modifier = Modifier) {
                         Offset(worldLeft, worldTop),
                         androidx.compose.ui.geometry.Size(worldRight - worldLeft, worldBottom - worldTop)
                     )
-                    when (boardSettings?.pattern ?: PaperPattern.RULED) {
+                    when (pageSettings.pattern) {
                         PaperPattern.RULED -> {
                             var y = floor(worldTop / spacing) * spacing
                             while (y < worldBottom) {
@@ -192,7 +197,7 @@ fun EditorCanvas(vm: EditorViewModel, modifier: Modifier = Modifier) {
 
                         PaperPattern.BLANK -> Unit
                     }
-                    if (boardSettings?.showMargin == true) {
+                    if (pageSettings.showMargin) {
                         drawLine(
                             palette.Rose.copy(alpha = 0.8f),
                             Offset(74f, worldTop),
