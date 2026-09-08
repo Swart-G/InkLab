@@ -8,6 +8,8 @@ import androidx.test.platform.app.InstrumentationRegistry
 import dev.swart.inklab.core.model.DocumentFormat
 import dev.swart.inklab.core.model.InkBoard
 import dev.swart.inklab.core.model.InkFolder
+import dev.swart.inklab.core.storage.AssetKind
+import dev.swart.inklab.core.storage.AssetStore
 import dev.swart.inklab.core.storage.BoardRepository
 import org.json.JSONObject
 import org.junit.After
@@ -17,6 +19,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
+import java.io.ByteArrayInputStream
 import java.io.File
 import java.util.UUID
 
@@ -275,6 +278,24 @@ class TransactionalStorageTest {
         assertEquals("Recovered", BoardRepository(app).load().single().title)
         val recoveryRoots = app.filesDir.listFiles()?.filter { it.isDirectory && it.name.startsWith("recovery-") }.orEmpty()
         assertTrue(recoveryRoots.any { File(it, "library-store-v1/journal.ndjson").exists() })
+    }
+
+    @Test
+    fun orphanAssetObjectIsRecoveredByIdempotentReimport() {
+        val bytes = "%PDF-1.7\norphan fixture\n%%EOF\n".toByteArray()
+        val store = AssetStore(app)
+        val first = store.import(ByteArrayInputStream(bytes), AssetKind.PDF)
+        val metadata = File(app.filesDir, "assets-v1/metadata/${first.id}.json")
+        val backup = File(app.filesDir, "assets-v1/metadata/${first.id}.json.bak")
+        assertTrue(metadata.delete())
+        backup.delete()
+        assertTrue(first.file.isFile)
+
+        val recovered = store.import(ByteArrayInputStream(bytes), AssetKind.PDF)
+
+        assertEquals(first.id, recovered.id)
+        assertEquals(1, store.list().size)
+        assertEquals(recovered, store.verify(recovered.id))
     }
 
     @Test

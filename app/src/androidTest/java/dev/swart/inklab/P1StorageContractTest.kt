@@ -19,6 +19,8 @@ import dev.swart.inklab.core.model.PageBackgroundKind
 import dev.swart.inklab.core.model.PageBackgroundTransform
 import dev.swart.inklab.core.model.PageSourceBox
 import dev.swart.inklab.core.model.PaperPattern
+import dev.swart.inklab.core.storage.AssetKind
+import dev.swart.inklab.core.storage.AssetStore
 import dev.swart.inklab.core.storage.BoardRepository
 import org.json.JSONArray
 import org.json.JSONObject
@@ -29,7 +31,9 @@ import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
+import java.io.ByteArrayInputStream
 import java.io.File
+import java.io.RandomAccessFile
 import java.security.MessageDigest
 import java.util.UUID
 
@@ -193,6 +197,78 @@ class P1StorageContractTest {
         PageRenderer.draw(Canvas(bitmap), page, documentDefaults)
 
         assertEquals(pageSettings.paperColor.toInt(), bitmap.getPixel(20, 20))
+    }
+
+    @Test
+    fun assetStorePublishesContentAddressedPdfAndDeduplicates() {
+        val store = AssetStore(app)
+        val bytes = "%PDF-1.7\n1 0 obj\n<<>>\nendobj\n%%EOF\n".toByteArray()
+        val expectedHash = sha256(bytes)
+
+        val first = store.import(ByteArrayInputStream(bytes), AssetKind.PDF, reportedMimeType = "text/plain")
+        val second = store.import(ByteArrayInputStream(bytes), AssetKind.PDF, reportedMimeType = "application/octet-stream")
+
+        assertEquals("a-$expectedHash", first.id)
+        assertEquals(first.id, second.id)
+        assertEquals("application/pdf", first.mimeType)
+        assertEquals(bytes.size.toLong(), first.sizeBytes)
+        assertEquals(1, store.list().size)
+        assertTrue(first.file.isFile)
+        assertEquals(bytes.toList(), first.file.readBytes().toList())
+    }
+
+    @Test
+    fun assetStoreDetectsImageMagicAndRejectsWrongExpectedKind() {
+        val jpeg = byteArrayOf(
+            0xff.toByte(), 0xd8.toByte(), 0xff.toByte(), 0xe0.toByte(),
+            0x00, 0x10, 0x4a, 0x46, 0x49, 0x46, 0x00
+        )
+        val store = AssetStore(app)
+
+        val failure = runCatching {
+            store.import(ByteArrayInputStream(jpeg), AssetKind.PDF, reportedMimeType = "application/pdf")
+        }.exceptionOrNull()
+        assertTrue(failure is IllegalArgumentException)
+        assertTrue(store.list().isEmpty())
+
+        val image = store.import(ByteArrayInputStream(jpeg), AssetKind.IMAGE, reportedMimeType = "application/octet-stream")
+        assertEquals("image/jpeg", image.mimeType)
+        assertEquals(AssetKind.IMAGE, image.kind)
+    }
+
+    @Test
+    fun assetStoreRejectsInvalidAndOversizedInputsWithoutPublication() {
+        val store = AssetStore(app)
+        val invalid = ByteArray(64) { 0x41 }
+        val invalidFailure = runCatching {
+            store.import(ByteArrayInputStream(invalid), AssetKind.IMAGE)
+        }.exceptionOrNull()
+        assertTrue(invalidFailure is IllegalArgumentException)
+        assertTrue(store.list().isEmpty())
+
+        val pdf = ("%PDF-1.7\n" + "x".repeat(128)).toByteArray()
+        val oversizedFailure = runCatching {
+            store.import(ByteArrayInputStream(pdf), AssetKind.PDF, maxBytes = 16)
+        }.exceptionOrNull()
+        assertTrue(oversizedFailure is IllegalArgumentException)
+        assertTrue(store.list().isEmpty())
+        assertTrue(File(app.filesDir, "assets-v1/staging").listFiles().orEmpty().isEmpty())
+    }
+
+    @Test
+    fun assetStoreFullVerificationDetectsByteCorruption() {
+        val store = AssetStore(app)
+        val bytes = "%PDF-1.4\nfixture\n%%EOF\n".toByteArray()
+        val asset = store.import(ByteArrayInputStream(bytes), AssetKind.PDF)
+
+        RandomAccessFile(asset.file, "rw").use { file ->
+            file.seek((asset.sizeBytes / 2).coerceAtLeast(0))
+            file.writeByte('X'.code)
+        }
+
+        val failure = runCatching { store.verify(asset.id) }.exceptionOrNull()
+        assertTrue(failure is IllegalArgumentException)
+        assertTrue(failure?.message.orEmpty().contains("Checksum mismatch"))
     }
 
     @Test
