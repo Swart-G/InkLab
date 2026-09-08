@@ -1,10 +1,11 @@
 package dev.swart.inklab.ui.screens
 
 import androidx.activity.compose.BackHandler
-import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.rememberScrollState
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -20,6 +21,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Add
@@ -28,10 +30,13 @@ import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.Draw
 import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.Folder
+import androidx.compose.material.icons.outlined.Image
 import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.NoteAlt
+import androidx.compose.material.icons.outlined.PictureAsPdf
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilterChip
@@ -47,13 +52,17 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import dev.swart.inklab.core.importing.DocumentImportService
+import dev.swart.inklab.core.importing.ImportDocumentKind
 import dev.swart.inklab.core.model.BoardSettings
 import dev.swart.inklab.core.model.DocumentFormat
 import dev.swart.inklab.core.model.InkBoard
@@ -64,6 +73,9 @@ import dev.swart.inklab.ui.EditorViewModel
 import dev.swart.inklab.ui.theme.InkColors
 import java.text.DateFormat
 import java.util.Date
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 
 @Composable
 fun BoardsScreen(vm: EditorViewModel) {
@@ -72,6 +84,41 @@ fun BoardsScreen(vm: EditorViewModel) {
     var libraryMenu by remember { mutableStateOf(false) }
     var creatingFormat by remember { mutableStateOf<DocumentFormat?>(null) }
     var creatingFolder by remember { mutableStateOf(false) }
+    var importingLabel by remember { mutableStateOf<String?>(null) }
+    var importError by remember { mutableStateOf<String?>(null) }
+
+    val context = LocalContext.current.applicationContext
+    val importService = remember(context) { DocumentImportService(context) }
+    val scope = rememberCoroutineScope()
+
+    fun startImport(uri: android.net.Uri, kind: ImportDocumentKind, folderId: String?) {
+        if (importingLabel != null) return
+        importingLabel = if (kind == ImportDocumentKind.PDF) "Импортируем PDF…" else "Импортируем изображение…"
+        importError = null
+        scope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching { importService.import(uri, kind, folderId) }
+            }
+            result.onSuccess { board ->
+                // The asset was fully published and probed before the document becomes visible.
+                // Opening the board first also makes flush() work when the library was previously empty.
+                vm.boards.add(0, board)
+                vm.openBoard(board.id, persistPrevious = false)
+                vm.flush()
+                importingLabel = null
+            }.onFailure { error ->
+                importingLabel = null
+                importError = error.message ?: "Не удалось импортировать файл"
+            }
+        }
+    }
+
+    val pdfPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        uri?.let { startImport(it, ImportDocumentKind.PDF, currentFolderId) }
+    }
+    val imagePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        uri?.let { startImport(it, ImportDocumentKind.IMAGE, currentFolderId) }
+    }
 
     var query by rememberSaveable { mutableStateOf("") }
     var favoritesOnly by rememberSaveable { mutableStateOf(false) }
@@ -80,16 +127,14 @@ fun BoardsScreen(vm: EditorViewModel) {
     val visibleFolders = vm.folders.filter { it.parentId == currentFolderId && query.isBlank() && !favoritesOnly }.sortedByDescending { it.updatedAt }
     val visibleBoards = vm.boards.filter {
         it.deletedAt == null && (query.isNotBlank() || favoritesOnly || it.folderId == currentFolderId) && (!favoritesOnly || it.favorite) &&
-            (query.isBlank() || it.title.contains(query,true) || it.subject.contains(query,true) || it.pages.any { page -> page.convertedObjects.any { item -> item.content.contains(query,true) } })
-    }.let { if(sortByName) it.sortedBy { it.title.lowercase() } else it.sortedByDescending { it.updatedAt } }
+            (query.isBlank() || it.title.contains(query, true) || it.subject.contains(query, true) || it.pages.any { page -> page.convertedObjects.any { item -> item.content.contains(query, true) } })
+    }.let { if (sortByName) it.sortedBy { it.title.lowercase() } else it.sortedByDescending { it.updatedAt } }
     val breadcrumb = generateSequence(currentFolder) { folder ->
         folder.parentId?.let { parentId -> vm.folders.firstOrNull { it.id == parentId } }
     }.toList().asReversed().joinToString(" / ") { it.title }
 
     fun goBack() {
-        if (currentFolder != null) {
-            currentFolderId = currentFolder.parentId
-        }
+        if (currentFolder != null) currentFolderId = currentFolder.parentId
     }
 
     val canGoBack = currentFolder != null
@@ -114,10 +159,10 @@ fun BoardsScreen(vm: EditorViewModel) {
                     }
                 }
             }
-            OutlinedTextField(query,{query=it},label={Text("Поиск по названиям и распознанному тексту")},singleLine=true,modifier=Modifier.fillMaxWidth())
+            OutlinedTextField(query, { query = it }, label = { Text("Поиск по названиям и распознанному тексту") }, singleLine = true, modifier = Modifier.fillMaxWidth())
             Row(Modifier.horizontalScroll(rememberScrollState())) {
-                TextButton(onClick={favoritesOnly=!favoritesOnly}) {Text(if(favoritesOnly) "★ Избранное" else "☆ Избранное")}
-                TextButton(onClick={sortByName=!sortByName}) {Text(if(sortByName) "По имени" else "По изменению")}
+                TextButton(onClick = { favoritesOnly = !favoritesOnly }) { Text(if (favoritesOnly) "★ Избранное" else "☆ Избранное") }
+                TextButton(onClick = { sortByName = !sortByName }) { Text(if (sortByName) "По имени" else "По изменению") }
             }
             Spacer(Modifier.height(12.dp))
 
@@ -127,7 +172,7 @@ fun BoardsScreen(vm: EditorViewModel) {
                         Icon(Icons.Outlined.Folder, null, tint = InkColors.Accent, modifier = Modifier.padding(22.dp).size(40.dp))
                     }
                     Spacer(Modifier.height(16.dp))
-                    Text(if(query.isNotBlank() || favoritesOnly) "Ничего не найдено" else if (currentFolder == null) "Здесь появятся ваши доски, тетради и папки" else "Папка пока пустая", color = InkColors.Muted)
+                    Text(if (query.isNotBlank() || favoritesOnly) "Ничего не найдено" else if (currentFolder == null) "Здесь появятся ваши доски, тетради и папки" else "Папка пока пустая", color = InkColors.Muted)
                     TextButton(onClick = { createMenu = true }) { Text("Создать") }
                 }
             } else {
@@ -152,7 +197,7 @@ fun BoardsScreen(vm: EditorViewModel) {
                             active = board.id == vm.currentBoardId,
                             onOpen = {
                                 vm.openBoard(board.id)
-                                if(query.isNotBlank()) board.pages.indexOfFirst { page -> page.convertedObjects.any { it.content.contains(query,true) } }.takeIf {it>=0}?.let(vm::openPage)
+                                if (query.isNotBlank()) board.pages.indexOfFirst { page -> page.convertedObjects.any { it.content.contains(query, true) } }.takeIf { it >= 0 }?.let(vm::openPage)
                             },
                             onRename = { vm.renameBoard(board.id, it) },
                             onDelete = { vm.deleteBoard(board.id) }
@@ -180,6 +225,22 @@ fun BoardsScreen(vm: EditorViewModel) {
                     onClick = { createMenu = false; creatingFormat = DocumentFormat.NOTEBOOK }
                 )
                 DropdownMenuItem(
+                    text = { Text("PDF") },
+                    leadingIcon = { Icon(Icons.Outlined.PictureAsPdf, null) },
+                    onClick = {
+                        createMenu = false
+                        pdfPicker.launch(arrayOf("application/pdf"))
+                    }
+                )
+                DropdownMenuItem(
+                    text = { Text("Изображение") },
+                    leadingIcon = { Icon(Icons.Outlined.Image, null) },
+                    onClick = {
+                        createMenu = false
+                        imagePicker.launch(arrayOf("image/png", "image/jpeg", "image/webp"))
+                    }
+                )
+                DropdownMenuItem(
                     text = { Text("Папка") },
                     leadingIcon = { Icon(Icons.Outlined.Folder, null) },
                     onClick = { createMenu = false; creatingFolder = true }
@@ -201,6 +262,27 @@ fun BoardsScreen(vm: EditorViewModel) {
             vm.createFolder(name, currentFolderId)
             creatingFolder = false
         }
+    }
+    importingLabel?.let { label ->
+        AlertDialog(
+            onDismissRequest = {},
+            title = { Text(label) },
+            text = {
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                    CircularProgressIndicator(modifier = Modifier.size(28.dp), strokeWidth = 3.dp)
+                    Text("Файл копируется в локальное хранилище и проверяется. Можно продолжить после завершения импорта.")
+                }
+            },
+            confirmButton = {}
+        )
+    }
+    importError?.let { message ->
+        AlertDialog(
+            onDismissRequest = { importError = null },
+            title = { Text("Не удалось импортировать файл") },
+            text = { Text(message) },
+            confirmButton = { TextButton(onClick = { importError = null }) { Text("ОК") } }
+        )
     }
 }
 
@@ -234,7 +316,7 @@ private fun BoardCard(
                     board.pages.firstOrNull()?.let { PageThumbnail(it, board.settings, Modifier.fillMaxSize()) }
                 }
             }
-            Text(if(board.format == DocumentFormat.NOTEBOOK) "${board.pages.size} стр. · $strokeCount штрихов" else "Бесконечная доска · $strokeCount штрихов", style = MaterialTheme.typography.bodySmall, color = InkColors.Muted)
+            Text(if (board.format == DocumentFormat.NOTEBOOK) "${board.pages.size} стр. · $strokeCount штрихов" else "Бесконечная доска · $strokeCount штрихов", style = MaterialTheme.typography.bodySmall, color = InkColors.Muted)
 
             Spacer(Modifier.height(14.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
