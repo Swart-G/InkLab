@@ -79,7 +79,11 @@ private data class SaveRequest(
 class EditorViewModel(application: Application) : AndroidViewModel(application) {
     private val boardRepository = BoardRepository(application)
     private val inputRepository = InputPreferencesRepository(application)
-    private val initialInputPreferences = inputRepository.load()
+    private val initialInputPreferences = inputRepository.load().let { loaded ->
+        val colors = loaded.quickPenColors.toMutableList()
+        if (colors.size == 4) colors[0] = loaded.penColor
+        loaded.copy(quickPenColors = colors)
+    }
 
     val boards = mutableStateListOf<InkBoard>()
     val folders = mutableStateListOf<InkFolder>()
@@ -425,42 +429,50 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     fun restorePreferences(json: org.json.JSONObject?) {
         if (json == null) return
         val prefs = inputPreferences
+        val restoredPenColor = json.optInt("penColor", prefs.penColor)
+        val restoredQuickColors = json.optString("quickPenColors").split(',')
+            .mapNotNull { it.toLongOrNull(16)?.toInt() }
+            .takeIf { it.size == 4 }
+            ?: prefs.quickPenColors.toMutableList().also { if (it.size == 4) it[0] = restoredPenColor }
         updateInputPreferences(prefs.copy(
             darkTheme = json.optBoolean("darkTheme", prefs.darkTheme), systemTheme = json.optBoolean("systemTheme", prefs.systemTheme),
             nightPaper = json.optBoolean("nightPaper", prefs.nightPaper), twoFingerUndo = json.optBoolean("twoFingerUndo", prefs.twoFingerUndo),
             wifiOnlyModels = json.optBoolean("wifiOnlyModels", prefs.wifiOnlyModels), palmRejection = json.optBoolean("palmRejection", prefs.palmRejection),
             pressureEnabled = json.optBoolean("pressureEnabled", prefs.pressureEnabled), autoShapes = json.optBoolean("autoShapes", prefs.autoShapes),
-            penColor = json.optInt("penColor", prefs.penColor), eraserRadius = json.optDouble("eraserRadius", prefs.eraserRadius.toDouble()).toFloat().coerceIn(8f,54f),
+            penColor = restoredQuickColors.firstOrNull() ?: restoredPenColor,
+            eraserRadius = json.optDouble("eraserRadius", prefs.eraserRadius.toDouble()).toFloat().coerceIn(8f,54f),
             stylusButtonAction = runCatching { StylusButtonAction.valueOf(json.getString("stylusButtonAction")) }.getOrDefault(prefs.stylusButtonAction),
             eraserMode = runCatching { EraserMode.valueOf(json.getString("eraserMode")) }.getOrDefault(prefs.eraserMode),
-            quickPenColors = json.optString("quickPenColors").split(',').mapNotNull {it.toLongOrNull(16)?.toInt()}.takeIf {it.size==4} ?: prefs.quickPenColors
+            quickPenColors = restoredQuickColors
         ))
         penColor = Color(inputPreferences.penColor)
     }
     fun allDocuments(): List<InkBoard> { persistCurrentBoard(); return boards.toList() }
 
     fun updateInputPreferences(value: InputPreferences) {
-        inputPreferences = value.copy(quickPenColors = value.quickPenColors.mapIndexed { index, color -> if(index == 0) 0xFF25272C.toInt() else color })
+        val colors = value.quickPenColors.takeIf { it.size == 4 } ?: inputPreferences.quickPenColors
+        inputPreferences = value.copy(
+            penColor = colors.first(),
+            quickPenColors = colors.toList()
+        )
         inputRepository.save(inputPreferences)
     }
 
     fun choosePenColor(color: Color) {
         penColor = color
-        updateInputPreferences(inputPreferences.copy(penColor = color.toArgb()))
-    }
-
-    fun chooseQuickPenColor(index: Int) {
-        val value = if (index == 0) 0xFF25272C.toInt() else inputPreferences.quickPenColors.getOrNull(index) ?: return
-        choosePenColor(Color(value))
         tool = EditorTool.PEN
     }
 
+    fun chooseQuickPenColor(index: Int) {
+        val value = inputPreferences.quickPenColors.getOrNull(index) ?: return
+        choosePenColor(Color(value))
+    }
+
     fun updateQuickPenColor(index: Int, color: Color) {
-        if (index == 0) return
         if (index !in inputPreferences.quickPenColors.indices) return
         val colors = inputPreferences.quickPenColors.toMutableList()
         colors[index] = color.toArgb()
-        updateInputPreferences(inputPreferences.copy(quickPenColors = colors, penColor = color.toArgb()))
+        updateInputPreferences(inputPreferences.copy(quickPenColors = colors))
         penColor = color
         tool = EditorTool.PEN
     }
