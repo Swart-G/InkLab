@@ -53,6 +53,54 @@ data class BoardSettings(
     val showMargin: Boolean = false
 )
 
+enum class PageBackgroundKind { PAPER, PDF, IMAGE }
+
+/** Source-space rectangle for PDF CropBox/MediaBox or a normalized image crop. */
+data class PageSourceBox(
+    val left: Float,
+    val top: Float,
+    val right: Float,
+    val bottom: Float
+) {
+    val width: Float get() = right - left
+    val height: Float get() = bottom - top
+}
+
+/**
+ * Affine source -> page-local transform.
+ * x' = a*x + c*y + tx, y' = b*x + d*y + ty.
+ */
+data class PageBackgroundTransform(
+    val a: Float = 1f,
+    val b: Float = 0f,
+    val c: Float = 0f,
+    val d: Float = 1f,
+    val tx: Float = 0f,
+    val ty: Float = 0f
+)
+
+/**
+ * Page-local background metadata. `null` on InkPage means "inherit document paper settings".
+ * Asset bytes are intentionally stored outside the document JSON; `assetId` is a stable reference
+ * that the asset-store/import slices can attach later without changing page coordinates again.
+ */
+data class PageBackground(
+    val kind: PageBackgroundKind,
+    val paper: BoardSettings? = null,
+    val assetId: String? = null,
+    val sourcePageIndex: Int? = null,
+    val sourceBox: PageSourceBox? = null,
+    val sourceRotationDegrees: Int = 0,
+    val transform: PageBackgroundTransform = PageBackgroundTransform()
+) {
+    companion object {
+        fun paper(settings: BoardSettings) = PageBackground(
+            kind = PageBackgroundKind.PAPER,
+            paper = settings
+        )
+    }
+}
+
 data class InkPage(
     val id: String = UUID.randomUUID().toString(),
     val strokes: List<InkStroke> = emptyList(),
@@ -60,8 +108,12 @@ data class InkPage(
     val width: Float = 1000f,
     val height: Float = 1414f,
     val originX: Float = 0f,
-    val originY: Float = 0f
-)
+    val originY: Float = 0f,
+    val background: PageBackground? = null
+) {
+    fun resolvedPaperSettings(documentDefaults: BoardSettings): BoardSettings =
+        background?.takeIf { it.kind == PageBackgroundKind.PAPER }?.paper ?: documentDefaults
+}
 
 data class InkFolder(
     val id: String = UUID.randomUUID().toString(),
