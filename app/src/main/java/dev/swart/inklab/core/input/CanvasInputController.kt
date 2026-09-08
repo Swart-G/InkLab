@@ -20,6 +20,8 @@ class CanvasInputController(private val vm: EditorViewModel, private val slop: F
     private var touchStarted = 0L
     private var touchCount = 0
     private var dragged = false
+    private var touchSelectionDragCandidate = false
+    private var touchSelectionDragging = false
     private var previous = emptyMap<Int, Offset>()
 
     fun hover(event: MotionEvent) {
@@ -40,12 +42,14 @@ class CanvasInputController(private val vm: EditorViewModel, private val slop: F
         buttons and (MotionEvent.BUTTON_STYLUS_PRIMARY or MotionEvent.BUTTON_STYLUS_SECONDARY) != 0
 
     fun cancel() {
-        if (penId != -1) vm.cancelInput()
+        if (penId != -1 || touchSelectionDragging) vm.cancelInput()
         penId = -1
         tool = null
         tap.cancel()
         previous = emptyMap()
         touchBlocked = true
+        touchSelectionDragCandidate = false
+        touchSelectionDragging = false
         stylusButton.reset()
     }
 
@@ -69,15 +73,26 @@ class CanvasInputController(private val vm: EditorViewModel, private val slop: F
         stylusButton.observePressedFlag(hasStylusButton(e.buttonState))
 
         val canceled = Build.VERSION.SDK_INT >= 33 && e.flags and MotionEvent.FLAG_CANCELED != 0
-        if (canceled) tap.cancel()
+        if (canceled) {
+            tap.cancel()
+            if (touchSelectionDragging) {
+                vm.cancelInput()
+                touchSelectionDragging = false
+                touchSelectionDragCandidate = false
+            }
+        }
         if (action == MotionEvent.ACTION_DOWN) {
             tap = TwoFingerTap(slop)
             previous = emptyMap()
             touchCount = 0
             dragged = false
+            touchSelectionDragging = false
             touchBlocked = vm.inputPreferences.palmRejection && (vm.stylusHover || e.eventTime - vm.lastStylusTime < 700L)
             touchStart = Offset(e.x, e.y)
             touchStarted = e.eventTime
+            touchSelectionDragCandidate = !touchBlocked && vm.selectionBounds
+                ?.inflate(18f / vm.viewportScale)
+                ?.contains(vm.screenToCanvas(touchStart)) == true
         }
 
         val penIndex = (0 until e.pointerCount).firstOrNull {
@@ -85,6 +100,11 @@ class CanvasInputController(private val vm: EditorViewModel, private val slop: F
         }
         if (penIndex != null) {
             tap.cancel()
+            if (touchSelectionDragging) {
+                vm.cancelInput()
+                touchSelectionDragging = false
+                touchSelectionDragCandidate = false
+            }
             touchBlocked = true
             val index = if (penId >= 0) e.findPointerIndex(penId) else penIndex
             if (index < 0) {
@@ -168,16 +188,33 @@ class CanvasInputController(private val vm: EditorViewModel, private val slop: F
             val i = e.actionIndex
             tap.down(e.getPointerId(i), e.getX(i), e.getY(i), e.eventTime)
             touchCount++
+            if (touchCount > 1) {
+                touchSelectionDragCandidate = false
+                if (touchSelectionDragging) {
+                    vm.cancelInput()
+                    touchSelectionDragging = false
+                    dragged = false
+                }
+            }
         }
         points.forEach { (id, p) -> tap.move(id, p.x, p.y) }
         if (vm.stylusHover || e.eventTime - vm.lastStylusTime < 700L || canceled) {
             if (vm.inputPreferences.palmRejection || canceled) touchBlocked = true
             tap.cancel()
+            touchSelectionDragCandidate = false
         }
         if (!touchBlocked && action == MotionEvent.ACTION_MOVE && points.keys == previous.keys) {
             val center = points.values.reduce { a, b -> a + b } / points.size.toFloat()
             val oldCenter = previous.values.reduce { a, b -> a + b } / previous.size.toFloat()
-            if (points.size == 1 && (center - touchStart).getDistance() >= slop) dragged = true
+            if (points.size == 1 && (center - touchStart).getDistance() >= slop && !dragged) {
+                dragged = true
+                if (touchSelectionDragCandidate) {
+                    vm.beginInput()
+                    vm.startLasso(vm.screenToCanvas(touchStart))
+                    touchSelectionDragging = true
+                    tap.cancel()
+                }
+            }
             if (points.size == 2) {
                 val p = points.values.toList()
                 val old = previous.values.toList()
@@ -192,11 +229,20 @@ class CanvasInputController(private val vm: EditorViewModel, private val slop: F
                     vm.panBy(center - oldCenter)
                 }
             } else if (dragged && points.size == 1) {
-                vm.panBy(center - oldCenter)
+                if (touchSelectionDragging) {
+                    vm.addLasso(vm.screenToCanvas(center))
+                } else {
+                    vm.panBy(center - oldCenter)
+                }
             }
         }
         if (action == MotionEvent.ACTION_UP) {
-            if (!touchBlocked && !canceled) {
+            if (touchSelectionDragging) {
+                vm.finishLasso()
+                vm.endInput()
+                touchSelectionDragging = false
+                touchSelectionDragCandidate = false
+            } else if (!touchBlocked && !canceled) {
                 if (vm.inputPreferences.twoFingerUndo && tap.finish(e.eventTime)) {
                     vm.undo()
                 } else if (touchCount == 1 && !dragged && e.eventTime - touchStarted < 250L) {
@@ -208,6 +254,7 @@ class CanvasInputController(private val vm: EditorViewModel, private val slop: F
             }
             vm.flush()
             previous = emptyMap()
+            touchSelectionDragCandidate = false
         } else {
             previous = points
         }
