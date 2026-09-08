@@ -13,10 +13,7 @@ import org.junit.Test
 class DocumentHistoryTest {
     private fun stroke(id: String, x: Float = 10f) = InkStroke(
         id = id,
-        points = listOf(
-            InkPoint(x, 10f, 1L),
-            InkPoint(x + 20f, 12f, 2L)
-        )
+        points = listOf(InkPoint(x, 10f, 1L), InkPoint(x + 20f, 12f, 2L))
     )
 
     private fun board(page: InkPage = InkPage(id = "page")) = InkBoard(
@@ -30,15 +27,12 @@ class DocumentHistoryTest {
         val history = DocumentHistory()
         val before = board()
         val after = before.copy(pages = listOf(before.pages.single().copy(strokes = listOf(stroke("s1")))))
-
         history.begin(before, 0)
         history.commit(after, 0)
-
         assertTrue(history.canUndo)
         val undone = history.undo(after)!!
         assertEquals(before.pages, undone.board.pages)
         assertTrue(history.canRedo)
-
         val redone = history.redo(undone.board)!!
         assertEquals(after.pages, redone.board.pages)
     }
@@ -50,10 +44,8 @@ class DocumentHistoryTest {
         val changed = original.copy(width = 17f, points = original.points.map { it.copy(x = it.x + 50f) })
         val before = board(InkPage(id = "page", strokes = listOf(original)))
         val after = before.copy(pages = listOf(before.pages.single().copy(strokes = listOf(changed))))
-
         history.begin(before, 0)
         history.commit(after, 0)
-
         assertEquals(original, history.undo(after)!!.board.pages.single().strokes.single())
     }
 
@@ -63,10 +55,8 @@ class DocumentHistoryTest {
         val before = board()
         val second = InkPage(id = "second")
         val after = before.copy(pages = before.pages + second, lastPageIndex = 1)
-
         history.begin(before, 0)
         history.commit(after, 1)
-
         val undone = history.undo(after)!!
         assertEquals(listOf("page"), undone.board.pages.map { it.id })
         assertEquals(0, undone.pageIndex)
@@ -87,10 +77,41 @@ class DocumentHistoryTest {
             history.commit(next, 0)
             current = next
         }
-
         assertEquals(100, history.undoSize)
         repeat(100) { current = history.undo(current)!!.board }
         assertFalse(history.canUndo)
         assertEquals(20, current.pages.single().strokes.size)
+    }
+
+    @Test
+    fun oversizedNewestOperationRemainsUndoable() {
+        val history = DocumentHistory(maxEntries = 100, maxEstimatedBytes = 1L)
+        val before = board()
+        val after = before.copy(pages = listOf(before.pages.single().copy(strokes = listOf(stroke("large")))))
+        history.begin(before, 0)
+        history.commit(after, 0)
+        assertTrue(history.estimatedBytes > 1L)
+        assertTrue(history.canUndo)
+        assertEquals(before.pages, history.undo(after)!!.board.pages)
+    }
+
+    @Test
+    fun memoryBudgetEvictsOlderOperationsBeforeNewest() {
+        val probe = DocumentHistory(maxEntries = 100, maxEstimatedBytes = Long.MAX_VALUE)
+        var current = board()
+        val first = current.copy(pages = listOf(current.pages.single().copy(strokes = listOf(stroke("s1")))))
+        probe.begin(current, 0)
+        probe.commit(first, 0)
+        val oneOperationBytes = probe.estimatedBytes
+
+        val history = DocumentHistory(maxEntries = 100, maxEstimatedBytes = oneOperationBytes + 1L)
+        history.begin(current, 0)
+        history.commit(first, 0)
+        current = first
+        val second = current.copy(pages = listOf(current.pages.single().copy(strokes = current.pages.single().strokes + stroke("s2"))))
+        history.begin(current, 0)
+        history.commit(second, 0)
+        assertEquals(1, history.undoSize)
+        assertEquals(first.pages, history.undo(second)!!.board.pages)
     }
 }

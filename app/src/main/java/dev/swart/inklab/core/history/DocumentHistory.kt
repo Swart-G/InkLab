@@ -5,20 +5,12 @@ import dev.swart.inklab.core.model.InkBoard
 import dev.swart.inklab.core.model.InkPage
 import dev.swart.inklab.core.model.InkStroke
 
-/**
- * Operation-based editor history.
- *
- * A full board snapshot exists only while an operation is being assembled. Committed history keeps
- * deltas for ordinary page-content edits and falls back to a structural operation only when the
- * page/trash structure itself changes. This avoids retaining a complete InkBoard snapshot for every
- * pen/eraser/lasso action while preserving exact reversible data.
- */
+/** Operation-based editor history with count and estimated-memory budgets. */
 class DocumentHistory(
     private val maxEntries: Int = 100,
     private val maxEstimatedBytes: Long = 32L * 1024L * 1024L
 ) {
     data class Result(val board: InkBoard, val pageIndex: Int)
-
     private data class Pending(val board: InkBoard, val pageIndex: Int)
 
     private sealed interface Operation {
@@ -39,13 +31,11 @@ class DocumentHistory(
     ) : Operation {
         override val estimatedBytes: Long =
             estimatePages(beforePages) + estimatePages(afterPages) + estimatePages(beforeTrash) + estimatePages(afterTrash)
-
         override fun forward(board: InkBoard): InkBoard = board.copy(
             pages = afterPages,
             trashedPages = afterTrash,
             lastPageIndex = afterPageIndex.coerceIn(0, afterPages.lastIndex)
         )
-
         override fun backward(board: InkBoard): InkBoard = board.copy(
             pages = beforePages,
             trashedPages = beforeTrash,
@@ -59,12 +49,10 @@ class DocumentHistory(
         override val afterPageIndex: Int
     ) : Operation {
         override val estimatedBytes: Long = deltas.sumOf { it.estimatedBytes }
-
         override fun forward(board: InkBoard): InkBoard = board.copy(
             pages = board.pages.map { page -> deltas.firstOrNull { it.pageId == page.id }?.forward(page) ?: page },
             lastPageIndex = afterPageIndex.coerceIn(0, board.pages.lastIndex)
         )
-
         override fun backward(board: InkBoard): InkBoard = board.copy(
             pages = board.pages.map { page -> deltas.firstOrNull { it.pageId == page.id }?.backward(page) ?: page },
             lastPageIndex = beforePageIndex.coerceIn(0, board.pages.lastIndex)
@@ -92,7 +80,6 @@ class DocumentHistory(
             strokes = rebuild(page.strokes, afterStrokeOrder, afterStrokePayload),
             convertedObjects = rebuild(page.convertedObjects, afterObjectOrder, afterObjectPayload)
         )
-
         fun backward(page: InkPage): InkPage = page.copy(
             strokes = rebuild(page.strokes, beforeStrokeOrder, beforeStrokePayload),
             convertedObjects = rebuild(page.convertedObjects, beforeObjectOrder, beforeObjectPayload)
@@ -118,9 +105,7 @@ class DocumentHistory(
         if (pending == null) pending = Pending(board, pageIndex)
     }
 
-    fun cancelPending() {
-        pending = null
-    }
+    fun cancelPending() { pending = null }
 
     fun commit(board: InkBoard, pageIndex: Int) {
         val before = pending ?: return
@@ -160,7 +145,7 @@ class DocumentHistory(
     }
 
     private fun trim(clearRedo: Boolean = true) {
-        while (undo.size > maxEntries || undoEstimatedBytes > maxEstimatedBytes) {
+        while (undo.size > maxEntries || (undoEstimatedBytes > maxEstimatedBytes && undo.size > 1)) {
             val removed = undo.removeFirstOrNull() ?: break
             undoEstimatedBytes = (undoEstimatedBytes - removed.estimatedBytes).coerceAtLeast(0L)
         }
@@ -169,21 +154,17 @@ class DocumentHistory(
 
     private fun buildOperation(before: InkBoard, after: InkBoard, beforeIndex: Int, afterIndex: Int): Operation? {
         if (before.pages == after.pages && before.trashedPages == after.trashedPages) return null
-        val sameStructure = before.pages.map { it.id } == after.pages.map { it.id } &&
-            before.trashedPages == after.trashedPages
+        val sameStructure = before.pages.map { it.id } == after.pages.map { it.id } && before.trashedPages == after.trashedPages
         if (!sameStructure) return structure(before, after, beforeIndex, afterIndex)
-
         val metadataChanged = before.pages.zip(after.pages).any { (oldPage, newPage) ->
             oldPage.copy(strokes = emptyList(), convertedObjects = emptyList()) !=
                 newPage.copy(strokes = emptyList(), convertedObjects = emptyList())
         }
         if (metadataChanged) return structure(before, after, beforeIndex, afterIndex)
-
         val pageDeltas = before.pages.zip(after.pages).mapNotNull { (oldPage, newPage) ->
             if (oldPage == newPage) null else pageDelta(oldPage, newPage)
         }
-        if (pageDeltas.isEmpty()) return null
-        return ContentOperation(pageDeltas, beforeIndex, afterIndex)
+        return if (pageDeltas.isEmpty()) null else ContentOperation(pageDeltas, beforeIndex, afterIndex)
     }
 
     private fun structure(before: InkBoard, after: InkBoard, beforeIndex: Int, afterIndex: Int) = StructureOperation(
@@ -221,12 +202,10 @@ class DocumentHistory(
             is ConvertedInkObject -> value.id
             else -> error("Unsupported history item ${value::class}")
         }
-
         private fun estimateIds(ids: List<String>): Long = ids.sumOf { 16L + it.length * 2L }
         private fun estimateStroke(stroke: InkStroke): Long = 96L + stroke.id.length * 2L + stroke.points.size * 32L
         private fun estimateObject(value: ConvertedInkObject): Long =
-            160L + value.id.length * 2L + value.content.length * 2L + value.providerId.length * 2L +
-                value.sourceStrokes.sumOf(::estimateStroke)
+            160L + value.id.length * 2L + value.content.length * 2L + value.providerId.length * 2L + value.sourceStrokes.sumOf(::estimateStroke)
         private fun estimatePage(page: InkPage): Long =
             128L + page.id.length * 2L + page.strokes.sumOf(::estimateStroke) + page.convertedObjects.sumOf(::estimateObject)
         private fun estimatePages(pages: List<InkPage>): Long = pages.sumOf(::estimatePage)
