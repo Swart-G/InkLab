@@ -328,12 +328,17 @@ private fun ToolDock(
     var optionsFor by remember { mutableStateOf<EditorTool?>(null) }
     var editingColorSlot by remember { mutableStateOf<Int?>(null) }
     var viewMenu by remember { mutableStateOf(false) }
+    val toolbarScrollState = rememberScrollState()
+
+    LaunchedEffect(focusMode) {
+        if (focusMode) toolbarScrollState.scrollTo(0)
+    }
 
     Box(modifier) {
         GlassPanel(Modifier.fillMaxWidth()) {
             Row(
                 Modifier.fillMaxWidth().heightIn(min = 48.dp, max = 56.dp)
-                    .horizontalScroll(rememberScrollState()),
+                    .horizontalScroll(toolbarScrollState),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 if (focusMode) {
