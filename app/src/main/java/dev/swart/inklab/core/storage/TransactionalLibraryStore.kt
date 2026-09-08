@@ -20,13 +20,6 @@ internal data class LibraryStoreCommit(
     val generationId: Long
 )
 
-/**
- * Crash-safe checkpoint store.
- *
- * generationId identifies a physical immutable checkpoint. journalSequence identifies the newest
- * durable logical mutation included in it. They are deliberately separate: an abandoned or corrupt
- * generation may consume a physical ID without consuming a logical save sequence.
- */
 internal class TransactionalLibraryStore(private val root: File) {
     private val documentsDirectory = File(root, "documents")
     private val generationsDirectory = File(root, "generations")
@@ -44,6 +37,11 @@ internal class TransactionalLibraryStore(private val root: File) {
 
     fun hasPublishedData(): Boolean =
         currentFile.isFile || generationsDirectory.listFiles()?.any { generationNumber(it) != null } == true
+
+    @Synchronized
+    fun resetCachedState() {
+        activeManifest = null
+    }
 
     @Synchronized
     fun load(): LibraryStoreSnapshot? {
@@ -85,7 +83,11 @@ internal class TransactionalLibraryStore(private val root: File) {
         require(documents.keys.all(::safeId)) { "Недопустимый documentId" }
         JSONArray(foldersJson)
 
-        if (activeManifest == null && hasPublishedData()) load()
+        // Recovery can deliberately replace an unreadable store with an empty root while keeping
+        // this repository instance alive. Never let a stale in-memory manifest survive that reset.
+        if (!hasPublishedData()) activeManifest = null
+        else if (activeManifest == null) load()
+
         val previous = activeManifest
         require(requestedSequence > (previous?.journalSequence ?: 0L)) {
             "Checkpoint journal sequence must increase: $requestedSequence <= ${previous?.journalSequence ?: 0L}"

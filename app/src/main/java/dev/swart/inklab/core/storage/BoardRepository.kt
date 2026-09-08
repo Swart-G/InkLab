@@ -27,8 +27,9 @@ data class LocalSaveReceipt(
 
 class BoardRepository(context: Context) {
     private val filesDir = context.filesDir
-    private val transactionalStore = TransactionalLibraryStore(File(filesDir, "library-store-v1"))
-    private val journal = DurableLibraryJournal(File(filesDir, "library-store-v1/journal.ndjson"))
+    private val transactionalRoot = File(filesDir, "library-store-v1")
+    private val transactionalStore = TransactionalLibraryStore(transactionalRoot)
+    private val journal = DurableLibraryJournal(File(transactionalRoot, "journal.ndjson"))
     private val directory = File(filesDir, "documents")
     private val migrationBackup = File(filesDir, "migration-v1")
     private val file = File(filesDir, "boards.json")
@@ -53,6 +54,11 @@ class BoardRepository(context: Context) {
         List(root.length()) { root.getJSONObject(it).toBoard() }
     }.also(::validateBoards)
 
+    /**
+     * Preserve the unreadable storage verbatim before allowing an explicit recovery/import flow to
+     * create a clean store. Nothing is removed until the recovery copy completed successfully.
+     */
+    @Synchronized
     fun allowRecovery() {
         if (loadError == null) return
         val recovery = File(filesDir, "recovery-${System.currentTimeMillis()}").apply { mkdirs() }
@@ -61,6 +67,14 @@ class BoardRepository(context: Context) {
         listOf(file, backupFile, foldersFile, foldersBackupFile).filter { it.exists() }.forEach {
             it.copyTo(File(recovery, it.name), overwrite = false)
         }
+        check(!transactionalRoot.exists() || transactionalRoot.deleteRecursively()) {
+            "Не удалось изолировать повреждённое локальное хранилище"
+        }
+        transactionalLoaded = false
+        cachedBoards = emptyList()
+        cachedFolders = emptyList()
+        lastCheckpointSequence = 0L
+        lastCommittedSequence = 0L
         loadError = null
     }
 
@@ -103,8 +117,7 @@ class BoardRepository(context: Context) {
 
     /**
      * Durably records one logical library mutation. The common path appends and fsyncs a journal
-     * delta; a full checkpoint is written only periodically. Therefore a confirmed pen-up does not
-     * require rewriting every unchanged document in the library.
+     * delta; a full checkpoint is written only periodically.
      */
     @Synchronized
     fun saveLibrary(boards: List<InkBoard>, folders: List<InkFolder>): LocalSaveReceipt {
@@ -112,10 +125,17 @@ class BoardRepository(context: Context) {
         validateBoards(boards)
         validateFolders(folders)
         ensureTransactionalStateLoadedForWrite()
+        check(loadError == null) { loadError.orEmpty() }
+        check(transactionalStore.hasPublishedData() || !journal.hasData) {
+            "Journal без базового checkpoint нельзя перезаписывать"
+        }
 
         if (!transactionalStore.hasPublishedData()) {
-            val documents = documentsJson(boards)
-            val commit = transactionalStore.commit(documents, foldersToJson(folders).toString(), requestedSequence = 1L)
+            val commit = transactionalStore.commit(
+                documentsJson(boards),
+                foldersToJson(folders).toString(),
+                requestedSequence = 1L
+            )
             cachedBoards = boards.toList()
             cachedFolders = folders.toList()
             transactionalLoaded = true
@@ -130,12 +150,14 @@ class BoardRepository(context: Context) {
         }
 
         val sequence = lastCommittedSequence + 1L
-        val entry = journal.append(sequence, mutation.toString())
-        applyMutationToCache(entry.payload)
+        journal.append(sequence, mutation.toString())
+        // The exact state passed by the caller is now represented by the durable mutation.
+        cachedBoards = boards.toList()
+        cachedFolders = folders.toList()
         lastCommittedSequence = sequence
 
         val shouldCheckpoint = journal.entryCountAfter(lastCheckpointSequence) >= CHECKPOINT_ENTRY_LIMIT ||
-            journal.sizeBytes >= CHECKPOINT_BYTES_LIMIT
+            journal.payloadBytesAfter(lastCheckpointSequence) >= CHECKPOINT_BYTES_LIMIT
         if (shouldCheckpoint) {
             val commit = checkpointInternal()
             return LocalSaveReceipt(sequence, commit.committedAt, checkpointed = true)
@@ -143,7 +165,6 @@ class BoardRepository(context: Context) {
         return LocalSaveReceipt(sequence, System.currentTimeMillis(), checkpointed = false)
     }
 
-    /** Force a checkpoint without changing the durable sequence. Safe to call on lifecycle stop. */
     @Synchronized
     fun checkpoint(): LocalSaveReceipt? {
         check(loadError == null) { loadError.orEmpty() }
@@ -169,7 +190,6 @@ class BoardRepository(context: Context) {
             foldersToJson(cachedFolders).toString(),
             requestedSequence = lastCommittedSequence
         )
-        // Preserve all records needed to reconstruct from the previous retained checkpoint.
         journal.compactThrough(commit.previousSequence)
         lastCheckpointSequence = commit.sequence
         return commit
@@ -243,13 +263,6 @@ class BoardRepository(context: Context) {
             if (orderChanged) put("order", JSONArray(afterBoards.map { it.id }))
             if (foldersChanged) put("folders", foldersToJson(afterFolders))
         }
-    }
-
-    private fun applyMutationToCache(payload: String) {
-        val documents = documentsJson(cachedBoards)
-        val state = applyMutation(documents, foldersToJson(cachedFolders).toString(), payload)
-        cachedBoards = state.first.values.map { JSONObject(it).toBoard() }.also(::validateBoards)
-        cachedFolders = parseFolders(JSONArray(state.second))
     }
 
     private fun applyMutation(

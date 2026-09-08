@@ -122,6 +122,34 @@ class TransactionalStorageTest {
     }
 
     @Test
+    fun explicitRecoveryCopiesCorruptStoreAndCanStartCleanGeneration() {
+        val original = InkBoard(id = "document", title = "Original", format = DocumentFormat.NOTEBOOK)
+        val seed = BoardRepository(app)
+        seed.saveLibrary(listOf(original), emptyList())
+        seed.saveLibrary(listOf(original.copy(title = "One")), emptyList())
+        seed.saveLibrary(listOf(original.copy(title = "Two")), emptyList())
+
+        val journal = File(app.filesDir, "library-store-v1/journal.ndjson")
+        val lines = journal.readLines().toMutableList()
+        lines[0] = lines[0].replaceFirst("\"sha256\":\"", "\"sha256\":\"0")
+        journal.writeText(lines.joinToString("\n", postfix = "\n"))
+
+        val broken = BoardRepository(app)
+        assertTrue(broken.load().isEmpty())
+        assertNotNull(broken.loadError)
+        broken.allowRecovery()
+
+        val recovered = original.copy(title = "Recovered")
+        val receipt = broken.saveLibrary(listOf(recovered), emptyList())
+        assertTrue(receipt.checkpointed)
+        assertEquals("Recovered", BoardRepository(app).load().single().title)
+
+        val recoveryRoots = app.filesDir.listFiles()?.filter { it.isDirectory && it.name.startsWith("recovery-") }.orEmpty()
+        assertTrue(recoveryRoots.isNotEmpty())
+        assertTrue(recoveryRoots.any { File(it, "library-store-v1/journal.ndjson").exists() })
+    }
+
+    @Test
     fun futureDocumentSchemaIsRejectedBeforeWrite() {
         val source = """[{"schemaVersion":999,"id":"future","pages":[{}]}]"""
         assertTrue(runCatching { BoardRepository(app).decode(source) }.isFailure)
