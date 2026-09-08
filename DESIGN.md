@@ -1,10 +1,20 @@
-# InkLab 2.0 visual direction
+# InkLab — направление интерфейса
 
-- Warm neutral workspace, distinct paper and one violet action accent.
-- Tools live above the paper; undo, redo, recording and document actions stay visible.
-- A notebook is a vertical strip of fixed-ratio pages. Device rotation never rotates its contents.
-- A collapsible thumbnail rail appears at 900 dp and wider. Smaller windows use a page dialog.
-- Focus mode hides the controls; the return action stays on screen.
-- Theme palettes are immutable composition-local values. Paper and neutral ink have a display-only night palette; export uses original colors.
-- Context actions remain attached to the selection using the same coordinate transform as drawing.
-- Language and recording controls describe user actions and installation state, without diagnostic details or invented download progress.
+Целевая спецификация от 8 сентября 2026. Это требования к следующему этапу, а не заявление, что все изменения уже реализованы. Полная версия: [план](INKLAB_CHANGE_PLAN.md), [эргономика](docs/ERGONOMICS.md).
+
+- Сохранить тёплое нейтральное рабочее пространство, отделённую бумагу и один фиолетовый акцент.
+- На планшете постоянный верх — не более двух строк суммарно до 112 dp без системных inset. Undo/Redo находятся вместе с инструментами, zoom не занимает отдельную строку.
+- Интерактивные области для пальца — минимум 48 × 48 dp. Плотность достигается устранением пустот и редких действий, а не уменьшением кнопок.
+- Тетрадь — непрерывная вертикальная лента страниц, доска — бесконечное пространство. Поворот устройства не поворачивает содержимое.
+- Панель страниц закрепляется только при достаточной полезной ширине canvas; в остальных случаях открывается overlay. Не вводить обязательную третью полосу миниатюр в узком окне.
+- Focus скрывает шапку и навигацию, оставляет компактные инструменты и явный выход. Сохраняет масштаб и место письма.
+- Перо использует инструмент, палец управляет, ладонь не изменяет документ. Кнопка стилуса включает временный ластик с возвратом прежнего состояния.
+- Порядок частых инструментов устойчив. Все быстрые цвета настраиваются; long press имеет альтернативу через параметры.
+- Контекстные действия привязаны к выделению тем же transform, что рендер. Меню учитывает края окна и клавиатуру.
+- Текст и формулы заменяют рукопись на месте, редактируются и возвращаются в исходные штрихи. Асинхронный результат не затирает новые правки.
+- Ночной вид бумаги/нейтральных чернил — только отображение. Пользовательские цвета, исходные PDF и экспорт не меняются неявно.
+- Локальный autosave и Google Drive имеют независимые честные статусы. Ошибка сети не блокирует письмо; ошибка локального сохранения заметна постоянно.
+- Запись лекции имеет компактный индикатор, подробности раскрываются по запросу. Незавершённое аудио не обозначается как сохранённое в облаке.
+- Поддержать левшу, крупный шрифт, TalkBack, портретную/альбомную ориентацию и split-screen. Приоритет доступности выше бюджета высоты для font scale 2.0.
+
+Приёмка: [измеримые критерии](docs/ERGONOMICS.md) и [матрица задач](docs/IMPLEMENTATION_TASKS.md). Текущие результаты замеров должны фиксироваться отдельно при реализации.
