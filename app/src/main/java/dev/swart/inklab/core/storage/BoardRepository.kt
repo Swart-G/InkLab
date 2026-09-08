@@ -19,103 +19,437 @@ import org.json.JSONObject
 import java.io.File
 import java.util.UUID
 
+data class LocalSaveReceipt(
+    val sequence: Long,
+    val committedAt: Long,
+    val checkpointed: Boolean = false
+)
+
 class BoardRepository(context: Context) {
-    private val savedDocuments = mutableMapOf<String, InkBoard>()
-    private val directory = File(context.filesDir, "documents")
-    private val migrationBackup = File(context.filesDir, "migration-v1")
+    private val filesDir = context.filesDir
+    private val transactionalRoot = File(filesDir, "library-store-v1")
+    private val transactionalStore = TransactionalLibraryStore(transactionalRoot)
+    private val journal = DurableLibraryJournal(File(transactionalRoot, "journal.ndjson"))
+    private val directory = File(filesDir, "documents")
+    private val migrationBackup = File(filesDir, "migration-v1")
+    private val file = File(filesDir, "boards.json")
+    private val backupFile = File(filesDir, "boards.json.bak")
+    private val foldersFile = File(filesDir, "folders.json")
+    private val foldersBackupFile = File(filesDir, "folders.json.bak")
+
+    private var cachedBoards: List<InkBoard> = emptyList()
+    private var cachedFolders: List<InkFolder> = emptyList()
+    private var transactionalLoaded = false
+    private var legacyFoldersLoaded = false
+    private var lastCheckpointSequence = 0L
+
     var loadError: String? = null
+        private set
+    var lastCommittedSequence: Long = 0L
         private set
 
     fun encode(boards: List<InkBoard>): String = JSONArray().apply { boards.forEach { put(it.toJson()) } }.toString()
+
     fun decode(value: String): List<InkBoard> = JSONArray(value).let { root ->
         List(root.length()) { root.getJSONObject(it).toBoard() }
+    }.also(::validateBoards)
+
+    /**
+     * Preserve the unreadable storage verbatim before allowing an explicit recovery/import flow to
+     * create a clean store. Nothing is removed until the recovery copy completed successfully.
+     */
+    @Synchronized
+    fun allowRecovery() {
+        if (loadError == null) return
+        val recovery = File(filesDir, "recovery-${System.currentTimeMillis()}").apply { mkdirs() }
+        if (directory.exists()) directory.copyRecursively(File(recovery, "documents"))
+        transactionalStore.copyForRecovery(File(recovery, "library-store-v1"))
+        listOf(file, backupFile, foldersFile, foldersBackupFile).filter { it.exists() }.forEach {
+            it.copyTo(File(recovery, it.name), overwrite = false)
+        }
+        check(!transactionalRoot.exists() || transactionalRoot.deleteRecursively()) {
+            "Не удалось изолировать повреждённое локальное хранилище"
+        }
+        transactionalLoaded = false
+        cachedBoards = emptyList()
+        cachedFolders = emptyList()
+        lastCheckpointSequence = 0L
+        lastCommittedSequence = 0L
+        loadError = null
     }
 
-    private val file = File(context.filesDir, "boards.json")
-    private val backupFile = File(context.filesDir, "boards.json.bak")
-    private val foldersFile = File(context.filesDir, "folders.json")
-    private val foldersBackupFile = File(context.filesDir, "folders.json.bak")
+    @Synchronized
+    fun load(): List<InkBoard> {
+        if (transactionalStore.hasPublishedData()) return loadTransactional().first
+        if (journal.hasData) {
+            loadError = "Найден journal без базового checkpoint. Исходные данные сохранены; запись заблокирована до восстановления."
+            return emptyList()
+        }
 
-    fun allowRecovery() {
-        if (loadError != null) {
-            val recovery = File(directory.parentFile, "recovery-${System.currentTimeMillis()}").apply { mkdirs() }
-            if (directory.exists()) directory.copyRecursively(File(recovery, "documents"))
-            listOf(file, backupFile, foldersFile, foldersBackupFile).filter { it.exists() }.forEach { it.copyTo(File(recovery,it.name)) }
-            loadError = null
+        val separate = loadSeparateDocuments()
+        val boards = separate ?: loadLegacyBoardsArray()
+        cachedBoards = boards
+        if (!legacyFoldersLoaded) {
+            cachedFolders = loadLegacyFoldersInternal()
+            legacyFoldersLoaded = true
+        }
+        if (boards.isNotEmpty() && loadError == null) {
+            backupLegacyStorage()
+            runCatching { saveLibrary(boards, cachedFolders) }
+                .onFailure { loadError = "Не удалось завершить миграцию локального хранилища: ${it.message}" }
+        }
+        return boards
+    }
+
+    @Synchronized
+    fun loadFolders(): List<InkFolder> {
+        if (transactionalStore.hasPublishedData()) return loadTransactional().second
+        if (journal.hasData) {
+            loadError = loadError ?: "Найден journal без базового checkpoint."
+            return emptyList()
+        }
+        if (!legacyFoldersLoaded) {
+            cachedFolders = loadLegacyFoldersInternal()
+            legacyFoldersLoaded = true
+        }
+        return cachedFolders
+    }
+
+    /**
+     * Durably records one logical library mutation. The common path appends and fsyncs a journal
+     * delta; a full checkpoint is written only periodically.
+     */
+    @Synchronized
+    fun saveLibrary(boards: List<InkBoard>, folders: List<InkFolder>): LocalSaveReceipt {
+        check(loadError == null) { loadError.orEmpty() }
+        validateBoards(boards)
+        validateFolders(folders)
+        ensureTransactionalStateLoadedForWrite()
+        check(loadError == null) { loadError.orEmpty() }
+        check(transactionalStore.hasPublishedData() || !journal.hasData) {
+            "Journal без базового checkpoint нельзя перезаписывать"
+        }
+
+        if (!transactionalStore.hasPublishedData()) {
+            val commit = transactionalStore.commit(
+                documentsJson(boards),
+                foldersToJson(folders).toString(),
+                requestedSequence = 1L
+            )
+            cachedBoards = boards.toList()
+            cachedFolders = folders.toList()
+            transactionalLoaded = true
+            lastCheckpointSequence = commit.sequence
+            lastCommittedSequence = commit.sequence
+            return LocalSaveReceipt(commit.sequence, commit.committedAt, checkpointed = true)
+        }
+
+        val mutation = buildMutation(cachedBoards, boards, cachedFolders, folders)
+        if (mutation == null) {
+            return LocalSaveReceipt(lastCommittedSequence, System.currentTimeMillis(), checkpointed = false)
+        }
+
+        val sequence = lastCommittedSequence + 1L
+        journal.append(sequence, mutation.toString())
+        // The exact state passed by the caller is now represented by the durable mutation.
+        cachedBoards = boards.toList()
+        cachedFolders = folders.toList()
+        lastCommittedSequence = sequence
+
+        val shouldCheckpoint = journal.entryCountAfter(lastCheckpointSequence) >= CHECKPOINT_ENTRY_LIMIT ||
+            journal.payloadBytesAfter(lastCheckpointSequence) >= CHECKPOINT_BYTES_LIMIT
+        if (shouldCheckpoint) {
+            val commit = checkpointInternal()
+            return LocalSaveReceipt(sequence, commit.committedAt, checkpointed = true)
+        }
+        return LocalSaveReceipt(sequence, System.currentTimeMillis(), checkpointed = false)
+    }
+
+    @Synchronized
+    fun checkpoint(): LocalSaveReceipt? {
+        check(loadError == null) { loadError.orEmpty() }
+        if (!transactionalStore.hasPublishedData() || lastCommittedSequence <= lastCheckpointSequence) return null
+        val commit = checkpointInternal()
+        return LocalSaveReceipt(commit.sequence, commit.committedAt, checkpointed = true)
+    }
+
+    @Synchronized
+    fun save(boards: List<InkBoard>): LocalSaveReceipt = saveLibrary(boards, cachedFolders)
+
+    @Synchronized
+    fun saveFolders(folders: List<InkFolder>): LocalSaveReceipt = saveLibrary(cachedBoards, folders)
+
+    private fun ensureTransactionalStateLoadedForWrite() {
+        if (transactionalLoaded) return
+        if (transactionalStore.hasPublishedData()) loadTransactional()
+    }
+
+    private fun checkpointInternal(): LibraryStoreCommit {
+        val commit = transactionalStore.commit(
+            documentsJson(cachedBoards),
+            foldersToJson(cachedFolders).toString(),
+            requestedSequence = lastCommittedSequence
+        )
+        journal.compactThrough(commit.previousSequence)
+        lastCheckpointSequence = commit.sequence
+        return commit
+    }
+
+    private fun loadTransactional(): Pair<List<InkBoard>, List<InkFolder>> {
+        if (transactionalLoaded) return cachedBoards to cachedFolders
+        val snapshot = runCatching { transactionalStore.load() }
+            .getOrElse {
+                loadError = "Локальное хранилище повреждено. Исходные generation сохранены: ${it.message}"
+                return emptyList<InkBoard>() to emptyList()
+            } ?: return emptyList<InkBoard>() to emptyList()
+
+        val documents = LinkedHashMap(snapshot.documents)
+        var foldersJson = snapshot.foldersJson
+        val replay = runCatching { journal.read(afterSequence = snapshot.sequence) }
+            .getOrElse {
+                loadError = "Журнал локальных изменений повреждён: ${it.message}"
+                return emptyList<InkBoard>() to emptyList()
+            }
+        runCatching {
+            replay.entries.forEach { entry ->
+                val state = applyMutation(documents, foldersJson, entry.payload)
+                documents.clear()
+                documents.putAll(state.first)
+                foldersJson = state.second
+            }
+        }.getOrElse {
+            loadError = "Не удалось восстановить подтверждённые изменения из journal: ${it.message}"
+            return emptyList<InkBoard>() to emptyList()
+        }
+
+        val boards = runCatching {
+            documents.values.map { JSONObject(it).toBoard() }.also(::validateBoards)
+        }.getOrElse {
+            loadError = "Документ имеет повреждённую или более новую схему. Запись заблокирована: ${it.message}"
+            return emptyList<InkBoard>() to emptyList()
+        }
+        val folders = runCatching { parseFolders(JSONArray(foldersJson)) }
+            .getOrElse {
+                loadError = "Не удалось прочитать метаданные папок: ${it.message}"
+                return boards to emptyList()
+            }
+
+        cachedBoards = boards
+        cachedFolders = folders
+        lastCheckpointSequence = snapshot.sequence
+        lastCommittedSequence = maxOf(snapshot.sequence, replay.entries.lastOrNull()?.sequence ?: journal.latestSequence())
+        transactionalLoaded = true
+        return boards to folders
+    }
+
+    /**
+     * Journal v2 avoids serialising the complete document on the common pen-up path. New documents
+     * and structural page-list changes still use a full upsert; edits inside an existing page store
+     * only document metadata and the page payloads that actually changed.
+     */
+    private fun buildMutation(
+        beforeBoards: List<InkBoard>,
+        afterBoards: List<InkBoard>,
+        beforeFolders: List<InkFolder>,
+        afterFolders: List<InkFolder>
+    ): JSONObject? {
+        if (beforeBoards == afterBoards && beforeFolders == afterFolders) return null
+        val old = beforeBoards.associateBy { it.id }
+        val fresh = afterBoards.associateBy { it.id }
+        val deleted = beforeBoards.map { it.id }.filter { it !in fresh }
+        val orderChanged = beforeBoards.map { it.id } != afterBoards.map { it.id }
+        val foldersChanged = beforeFolders != afterFolders
+
+        val upsert = JSONArray()
+        val patches = JSONArray()
+        afterBoards.forEach { board ->
+            val previous = old[board.id]
+            if (previous == board) return@forEach
+            if (previous == null || !samePageStructure(previous, board)) {
+                upsert.put(board.toJson())
+                return@forEach
+            }
+
+            val beforePages = (previous.pages + previous.trashedPages).associateBy { it.id }
+            val changedPages = (board.pages + board.trashedPages).filter { beforePages[it.id] != it }
+            patches.put(JSONObject().apply {
+                put("id", board.id)
+                put("meta", board.metadataJson())
+                put("pages", JSONArray().apply { changedPages.forEach { put(it.toJson()) } })
+            })
+        }
+
+        return JSONObject().apply {
+            put("version", JOURNAL_MUTATION_VERSION)
+            put("upsert", upsert)
+            put("patch", patches)
+            put("delete", JSONArray(deleted))
+            if (orderChanged) put("order", JSONArray(afterBoards.map { it.id }))
+            if (foldersChanged) put("folders", foldersToJson(afterFolders))
         }
     }
 
-    fun load(): List<InkBoard> {
-        if (directory.isDirectory && (File(directory, "index.json").exists() || File(directory, "index.json.bak").exists())) {
-            return loadArray(File(directory, "index.json"), File(directory, "index.json.bak")) { index ->
-                List(index.length()) { i ->
-                    val name = index.getString(i)
-                    require(name.matches(Regex("[a-zA-Z0-9-]+")))
-                    val target = File(directory, "$name.json")
-                    runCatching { JSONObject(target.readText()).toBoard() }.getOrElse {
-                        JSONObject(File(directory, "$name.json.bak").readText()).toBoard()
-                    }
+    private fun samePageStructure(before: InkBoard, after: InkBoard): Boolean =
+        before.pages.map { it.id } == after.pages.map { it.id } &&
+            before.trashedPages.map { it.id } == after.trashedPages.map { it.id }
+
+    private fun applyMutation(
+        baseDocuments: LinkedHashMap<String, String>,
+        baseFoldersJson: String,
+        payload: String
+    ): Pair<LinkedHashMap<String, String>, String> {
+        val root = JSONObject(payload)
+        val version = root.getInt("version")
+        require(version in 1..JOURNAL_MUTATION_VERSION) { "Неподдерживаемая версия journal mutation" }
+        val documents = LinkedHashMap(baseDocuments)
+
+        val deleted = root.optJSONArray("delete") ?: JSONArray()
+        repeat(deleted.length()) {
+            val id = deleted.getString(it)
+            require(safeId(id))
+            documents.remove(id)
+        }
+
+        val upsert = root.optJSONArray("upsert") ?: JSONArray()
+        repeat(upsert.length()) {
+            val json = upsert.getJSONObject(it)
+            val board = json.toBoard()
+            validateBoards(listOf(board))
+            documents[board.id] = board.toJson().toString()
+        }
+
+        if (version >= 2) {
+            val patches = root.optJSONArray("patch") ?: JSONArray()
+            repeat(patches.length()) { index ->
+                val patch = patches.getJSONObject(index)
+                val id = patch.getString("id")
+                require(safeId(id))
+                val currentJson = JSONObject(documents[id] ?: error("Patch ссылается на отсутствующий документ $id"))
+                require(currentJson.optString("id") == id)
+
+                val meta = patch.getJSONObject("meta")
+                val metaKeys = meta.keys()
+                while (metaKeys.hasNext()) {
+                    val key = metaKeys.next()
+                    require(key != "pages" && key != "trashedPages")
+                    currentJson.put(key, meta.get(key))
+                }
+
+                val pagePatches = patch.optJSONArray("pages") ?: JSONArray()
+                repeat(pagePatches.length()) { pageIndex ->
+                    replacePagePayload(currentJson, pagePatches.getJSONObject(pageIndex))
+                }
+
+                val board = currentJson.toBoard()
+                validateBoards(listOf(board))
+                documents[id] = board.toJson().toString()
+            }
+        }
+
+        val order = root.optJSONArray("order")
+        val ordered = if (order != null) {
+            val ids = List(order.length()) { order.getString(it) }
+            require(ids.distinct().size == ids.size)
+            require(ids.toSet() == documents.keys.toSet()) { "Journal order не соответствует набору документов" }
+            LinkedHashMap<String, String>().apply { ids.forEach { id -> put(id, documents.getValue(id)) } }
+        } else documents
+
+        val foldersJson = root.optJSONArray("folders")?.toString() ?: baseFoldersJson
+        parseFolders(JSONArray(foldersJson))
+        return ordered to foldersJson
+    }
+
+    private fun replacePagePayload(document: JSONObject, pagePayload: JSONObject) {
+        val pageId = pagePayload.getString("id")
+        require(safeId(pageId))
+        var matches = 0
+        listOf("pages", "trashedPages").forEach { key ->
+            val pages = document.optJSONArray(key) ?: return@forEach
+            repeat(pages.length()) { index ->
+                if (pages.getJSONObject(index).optString("id") == pageId) {
+                    pages.put(index, pagePayload)
+                    matches += 1
                 }
             }
         }
-        val old = loadArray(file, backupFile) { root -> List(root.length()) { root.getJSONObject(it).toBoard() } }
-        if (file.exists() && loadError == null) {
-            migrationBackup.mkdirs()
-            listOf(file, backupFile, foldersFile, foldersBackupFile).filter { it.exists() }.forEach {
-                val destination = File(migrationBackup, it.name)
-                if (!destination.exists()) it.copyTo(destination)
-            }
-        }
-        return old
+        require(matches == 1) { "Page patch $pageId не соответствует ровно одной странице" }
     }
 
-    fun loadFolders(): List<InkFolder> = loadArray(foldersFile, foldersBackupFile) { root ->
-        List(root.length()) { index ->
-            val item = root.getJSONObject(index)
-            InkFolder(
-                id = item.optString("id", UUID.randomUUID().toString()),
-                title = item.optString("title", "Новая папка"),
-                parentId = item.optString("parentId", "").takeIf { it.isNotBlank() },
-                createdAt = item.optLong("createdAt", System.currentTimeMillis()),
-                updatedAt = item.optLong("updatedAt", System.currentTimeMillis())
-            )
-        }
+    private fun documentsJson(boards: List<InkBoard>) = LinkedHashMap<String, String>(boards.size).apply {
+        boards.forEach { board -> put(board.id, board.toJson().toString()) }
     }
 
-    private fun <T> loadArray(primary: File, backup: File, parser: (JSONArray) -> List<T>): List<T> {
+    private fun loadSeparateDocuments(): List<InkBoard>? {
+        val primary = File(directory, "index.json")
+        val backup = File(directory, "index.json.bak")
+        if (!primary.exists() && !backup.exists()) return null
+        var indexFailure: Throwable? = null
         for (candidate in listOf(primary, backup)) {
             if (!candidate.isFile) continue
-            val parsed = runCatching { parser(JSONArray(candidate.readText())) }.getOrNull()
-            if (parsed != null) return parsed
+            val ids = runCatching {
+                val index = JSONArray(candidate.readText())
+                List(index.length()) { i -> index.getString(i).also { require(safeId(it)) } }
+            }.onFailure { indexFailure = it }.getOrNull() ?: continue
+            val result = ArrayList<InkBoard>(ids.size)
+            val damaged = mutableListOf<String>()
+            ids.forEach { id ->
+                val target = File(directory, "$id.json")
+                val board = listOf(target, File(directory, "$id.json.bak"))
+                    .firstNotNullOfOrNull { source ->
+                        if (!source.isFile) null else runCatching { JSONObject(source.readText()).toBoard() }.getOrNull()
+                    }
+                if (board == null) damaged += id else result += board
+            }
+            if (damaged.isNotEmpty()) {
+                loadError = "Не удалось прочитать документы: ${damaged.joinToString()}. Остальные документы доступны; запись заблокирована до восстановления."
+            }
+            return result
         }
-        if (primary.exists() || backup.exists()) loadError = "Не удалось прочитать ${primary.name}. Исходные файлы сохранены. Восстановите резервную копию."
+        loadError = "Не удалось прочитать index.json. Исходные файлы сохранены: ${indexFailure?.message.orEmpty()}"
         return emptyList()
     }
 
-    @Synchronized
-    fun save(boards: List<InkBoard>) {
-        check(loadError == null) { loadError.orEmpty() }
-        directory.mkdirs()
-        boards.forEach { board ->
-            if (savedDocuments[board.id] === board) return@forEach
-            require(board.id.matches(Regex("[a-zA-Z0-9-]+")))
-            val target = File(directory, "${board.id}.json")
-            val content = board.toJson().toString()
-            if (!target.exists() || target.readText() != content) writeAtomic(target, content)
-            savedDocuments[board.id] = board
+    private fun loadLegacyBoardsArray(): List<InkBoard> {
+        if (!file.exists() && !backupFile.exists()) return emptyList()
+        var failure: Throwable? = null
+        for (candidate in listOf(file, backupFile)) {
+            if (!candidate.isFile) continue
+            val parsed = runCatching {
+                val root = JSONArray(candidate.readText())
+                List(root.length()) { root.getJSONObject(it).toBoard() }.also(::validateBoards)
+            }.onFailure { failure = it }.getOrNull()
+            if (parsed != null) return parsed
         }
-        writeAtomic(File(directory, "index.json"), JSONArray(boards.map { it.id }).toString())
-        val retained = boards.map {it.id}.toSet()
-        directory.listFiles()?.filter { it.extension == "json" && it.name != "index.json" && it.nameWithoutExtension !in retained }?.forEach {
-            it.delete(); File(directory,"${it.name}.bak").delete(); savedDocuments.remove(it.nameWithoutExtension)
+        loadError = "Не удалось прочитать boards.json. Исходные файлы сохранены: ${failure?.message.orEmpty()}"
+        return emptyList()
+    }
+
+    private fun loadLegacyFoldersInternal(): List<InkFolder> {
+        if (!foldersFile.exists() && !foldersBackupFile.exists()) return emptyList()
+        var failure: Throwable? = null
+        for (candidate in listOf(foldersFile, foldersBackupFile)) {
+            if (!candidate.isFile) continue
+            val parsed = runCatching { parseFolders(JSONArray(candidate.readText())) }
+                .onFailure { failure = it }
+                .getOrNull()
+            if (parsed != null) return parsed
+        }
+        loadError = loadError ?: "Не удалось прочитать folders.json. Исходные файлы сохранены: ${failure?.message.orEmpty()}"
+        return emptyList()
+    }
+
+    private fun backupLegacyStorage() {
+        if (migrationBackup.exists()) return
+        migrationBackup.mkdirs()
+        if (directory.exists()) directory.copyRecursively(File(migrationBackup, "documents"), overwrite = false)
+        listOf(file, backupFile, foldersFile, foldersBackupFile).filter { it.exists() }.forEach {
+            it.copyTo(File(migrationBackup, it.name), overwrite = false)
         }
     }
 
-    @Synchronized
-    fun saveFolders(folders: List<InkFolder>) {
-        val root = JSONArray()
+    private fun foldersToJson(folders: List<InkFolder>) = JSONArray().apply {
         folders.forEach { folder ->
-            root.put(JSONObject().apply {
+            put(JSONObject().apply {
                 put("id", folder.id)
                 put("title", folder.title)
                 put("parentId", folder.parentId ?: JSONObject.NULL)
@@ -123,31 +457,51 @@ class BoardRepository(context: Context) {
                 put("updatedAt", folder.updatedAt)
             })
         }
-        writeAtomic(foldersFile, root.toString())
     }
 
-    private fun writeAtomic(target: File, content: String) {
-        target.parentFile?.mkdirs()
-        val atomic = android.util.AtomicFile(target)
-        val output = atomic.startWrite()
-        try {
-            output.write(content.toByteArray(Charsets.UTF_8))
-            atomic.finishWrite(output)
-        } catch (error: Throwable) {
-            atomic.failWrite(output)
-            throw error
+    private fun parseFolders(root: JSONArray): List<InkFolder> = List(root.length()) { index ->
+        val item = root.getJSONObject(index)
+        InkFolder(
+            id = item.optString("id", UUID.randomUUID().toString()),
+            title = item.optString("title", "Новая папка"),
+            parentId = item.optString("parentId", "").takeIf { it.isNotBlank() && it != "null" },
+            createdAt = item.optLong("createdAt", System.currentTimeMillis()),
+            updatedAt = item.optLong("updatedAt", System.currentTimeMillis())
+        )
+    }.also(::validateFolders)
+
+    private fun validateBoards(boards: List<InkBoard>) {
+        require(boards.map { it.id }.distinct().size == boards.size) { "Повторяющийся documentId" }
+        boards.forEach { board ->
+            require(safeId(board.id)) { "Недопустимый documentId" }
+            require(board.pages.isNotEmpty()) { "Документ не содержит страниц" }
+            val pageIds = (board.pages + board.trashedPages).map { it.id }
+            require(pageIds.distinct().size == pageIds.size) { "Повторяющийся pageId" }
         }
-        target.copyTo(File(target.parentFile, "${target.name}.bak"), overwrite = true)
     }
 
-    private fun InkBoard.toJson() = JSONObject().apply {
-        put("schemaVersion", 2)
+    private fun validateFolders(folders: List<InkFolder>) {
+        require(folders.map { it.id }.distinct().size == folders.size) { "Повторяющийся folderId" }
+        folders.forEach { require(safeId(it.id)) { "Недопустимый folderId" } }
+        val ids = folders.mapTo(mutableSetOf()) { it.id }
+        folders.forEach { folder -> require(folder.parentId == null || folder.parentId in ids) { "Папка ссылается на отсутствующего родителя" } }
+        folders.forEach { start ->
+            var current: InkFolder? = start
+            val seen = mutableSetOf<String>()
+            while (current != null) {
+                require(seen.add(current.id)) { "Цикл папок" }
+                val parent = current.parentId
+                current = folders.firstOrNull { it.id == parent }
+            }
+        }
+    }
+
+    /** Durable document metadata. Viewport scale/offset are intentionally excluded. */
+    private fun InkBoard.metadataJson() = JSONObject().apply {
+        put("schemaVersion", BOARD_SCHEMA_VERSION)
         put("languageTag", languageTag)
         put("favorite", favorite)
         put("deletedAt", deletedAt ?: JSONObject.NULL)
-        put("savedScale", savedScale.toDouble())
-        put("savedOffsetX", savedOffsetX.toDouble())
-        put("savedOffsetY", savedOffsetY.toDouble())
         put("id", id)
         put("title", title)
         put("subject", subject)
@@ -163,18 +517,25 @@ class BoardRepository(context: Context) {
             put("paperColor", settings.paperColor)
             put("showMargin", settings.showMargin)
         })
+    }
+
+    private fun InkBoard.toJson() = metadataJson().apply {
         put("pages", pagesJson(pages))
         put("trashedPages", pagesJson(trashedPages))
     }
 
+    private fun InkPage.toJson() = JSONObject().apply {
+        put("id", id)
+        put("width", width.toDouble())
+        put("height", height.toDouble())
+        put("originX", originX.toDouble())
+        put("originY", originY.toDouble())
+        put("strokes", JSONArray().apply { this@toJson.strokes.forEach { put(it.toJson()) } })
+        put("convertedObjects", convertedObjects.toJson())
+    }
+
     private fun pagesJson(pages: List<InkPage>) = JSONArray().apply {
-        pages.forEach { page -> put(JSONObject().apply {
-            put("id", page.id)
-            put("width", page.width.toDouble()); put("height", page.height.toDouble())
-            put("originX", page.originX.toDouble()); put("originY", page.originY.toDouble())
-            put("strokes", JSONArray().apply { page.strokes.forEach { put(it.toJson()) } })
-            put("convertedObjects", page.convertedObjects.toJson())
-        }) }
+        pages.forEach { put(it.toJson()) }
     }
 
     private fun List<ConvertedInkObject>.toJson() = JSONArray().apply {
@@ -233,6 +594,10 @@ class BoardRepository(context: Context) {
     }
 
     private fun JSONObject.toBoard(): InkBoard {
+        val schemaVersion = optInt("schemaVersion", 1)
+        require(schemaVersion in 1..BOARD_SCHEMA_VERSION) {
+            "Схема документа $schemaVersion новее поддерживаемой $BOARD_SCHEMA_VERSION"
+        }
         val settingsJson = optJSONObject("settings") ?: JSONObject()
         val settings = BoardSettings(
             pattern = runCatching { PaperPattern.valueOf(settingsJson.optString("pattern", PaperPattern.RULED.name)) }
@@ -272,25 +637,31 @@ class BoardRepository(context: Context) {
             val ratio = if (optString("orientation") == "LANDSCAPE") 1.414f else 1f / 1.414f
             val width = maxOf((right - left) * 1.05f, (bottom - top) * 1.05f * ratio)
             return InkPage(
-                id = page.optString("id", UUID.randomUUID().toString()), strokes = strokes, convertedObjects = objects,
+                id = page.optString("id", UUID.randomUUID().toString()),
+                strokes = strokes,
+                convertedObjects = objects,
                 width = page.optDouble("width", width.toDouble()).toFloat().coerceAtLeast(1f),
                 height = page.optDouble("height", (width / ratio).toDouble()).toFloat().coerceAtLeast(1f),
-                originX = page.optDouble("originX", (left - (right-left)*0.025f).toDouble()).toFloat(),
-                originY = page.optDouble("originY", (top - (bottom-top)*0.025f).toDouble()).toFloat()
+                originX = page.optDouble("originX", (left - (right - left) * 0.025f).toDouble()).toFloat(),
+                originY = page.optDouble("originY", (top - (bottom - top) * 0.025f).toDouble()).toFloat()
             )
         }
+
         val pagesJson = optJSONArray("pages")
         val pages = if (pagesJson != null && pagesJson.length() > 0) {
             List(pagesJson.length()) { parsePage(pagesJson.getJSONObject(it)) }
         } else listOf(parsePage(this))
-        (pages + (optJSONArray("trashedPages")?.let { arr -> List(arr.length()) { parsePage(arr.getJSONObject(it)) } } ?: emptyList())).forEach { page ->
-            require(page.width.isFinite() && page.height.isFinite() && page.width in 1f..1000000f && page.height in 1f..1000000f)
+        val trashed = optJSONArray("trashedPages")?.let { arr -> List(arr.length()) { parsePage(arr.getJSONObject(it)) } } ?: emptyList()
+        (pages + trashed).forEach { page ->
+            require(page.width.isFinite() && page.height.isFinite() && page.width in 1f..1_000_000f && page.height in 1f..1_000_000f)
             require(page.originX.isFinite() && page.originY.isFinite())
             (page.strokes + page.convertedObjects.flatMap { it.sourceStrokes }).forEach { stroke ->
                 require(stroke.width.isFinite() && stroke.width > 0f)
-                require(stroke.points.all { it.x.isFinite() && it.y.isFinite() && it.pressure.isFinite() })
+                require(stroke.points.all { it.x.isFinite() && it.y.isFinite() && it.pressure.isFinite() && it.tilt.isFinite() })
             }
-            page.convertedObjects.forEach { require(listOf(it.x,it.y,it.width,it.height,it.textSize).all(Float::isFinite) && it.width > 0 && it.height > 0 && it.textSize > 0) }
+            page.convertedObjects.forEach {
+                require(listOf(it.x, it.y, it.width, it.height, it.textSize).all(Float::isFinite) && it.width > 0 && it.height > 0 && it.textSize > 0)
+            }
         }
 
         return InkBoard(
@@ -309,12 +680,23 @@ class BoardRepository(context: Context) {
             languageTag = optString("languageTag", "ru-RU"),
             favorite = optBoolean("favorite", false),
             deletedAt = if (isNull("deletedAt")) null else optLong("deletedAt"),
-            trashedPages = optJSONArray("trashedPages")?.let { arr -> List(arr.length()) { parsePage(arr.getJSONObject(it)) } } ?: emptyList(),
+            trashedPages = trashed,
+            // Legacy v2 documents may contain viewport fields. Read them for the current session,
+            // but metadataJson()/toJson() deliberately never persist them again.
             savedScale = optDouble("savedScale", 0.0).toFloat(),
             savedOffsetX = optDouble("savedOffsetX", 0.0).toFloat(),
             savedOffsetY = optDouble("savedOffsetY", 0.0).toFloat(),
             folderId = optString("folderId", "").takeIf { it.isNotBlank() && it != "null" }
         )
+    }
+
+    private fun safeId(value: String) = value.matches(Regex("[a-zA-Z0-9-]+"))
+
+    companion object {
+        private const val BOARD_SCHEMA_VERSION = 2
+        private const val JOURNAL_MUTATION_VERSION = 2
+        private const val CHECKPOINT_ENTRY_LIMIT = 32
+        private const val CHECKPOINT_BYTES_LIMIT = 4L * 1024L * 1024L
     }
 }
 
@@ -362,7 +744,7 @@ class InputPreferencesRepository(context: Context) {
             ?.split(',')
             ?.mapNotNull { token -> token.toLongOrNull(16)?.toInt() }
             ?.takeIf { it.size == 4 }
-            ?.mapIndexed { index, color -> if(index == 0) 0xFF25272C.toInt() else color }
+            ?.mapIndexed { index, color -> if (index == 0) 0xFF25272C.toInt() else color }
             ?: defaultQuickPenColors,
         darkTheme = preferences.getBoolean("darkTheme", false),
         systemTheme = preferences.getBoolean("systemTheme", false),

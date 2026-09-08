@@ -87,7 +87,48 @@ data class InkBoard(
     val favorite: Boolean = false,
     val deletedAt: Long? = null,
     val trashedPages: List<InkPage> = emptyList(),
+    // Session-only viewport compatibility fields. They remain in the constructor while old UI code
+    // is migrated, but storage no longer writes them and document equality deliberately ignores them.
     val savedScale: Float = 0f,
     val savedOffsetX: Float = 0f,
     val savedOffsetY: Float = 0f
-)
+) {
+    override fun equals(other: Any?): Boolean {
+        if (this === other) return true
+        if (other !is InkBoard) return false
+        return id == other.id &&
+            title == other.title &&
+            subject == other.subject &&
+            createdAt == other.createdAt &&
+            updatedAt == other.updatedAt &&
+            format == other.format &&
+            orientation == other.orientation &&
+            settings == other.settings &&
+            pages == other.pages &&
+            lastPageIndex == other.lastPageIndex &&
+            folderId == other.folderId &&
+            languageTag == other.languageTag &&
+            favorite == other.favorite &&
+            deletedAt == other.deletedAt &&
+            trashedPages == other.trashedPages
+    }
+
+    override fun hashCode(): Int {
+        var result = id.hashCode()
+        result = 31 * result + title.hashCode()
+        result = 31 * result + subject.hashCode()
+        result = 31 * result + createdAt.hashCode()
+        result = 31 * result + updatedAt.hashCode()
+        result = 31 * result + format.hashCode()
+        result = 31 * result + orientation.hashCode()
+        result = 31 * result + settings.hashCode()
+        result = 31 * result + pages.hashCode()
+        result = 31 * result + lastPageIndex
+        result = 31 * result + (folderId?.hashCode() ?: 0)
+        result = 31 * result + languageTag.hashCode()
+        result = 31 * result + favorite.hashCode()
+        result = 31 * result + (deletedAt?.hashCode() ?: 0)
+        result = 31 * result + trashedPages.hashCode()
+        return result
+    }
+}

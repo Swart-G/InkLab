@@ -15,6 +15,7 @@ import androidx.compose.ui.graphics.toArgb
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import dev.swart.inklab.AppContainer
+import dev.swart.inklab.core.history.DocumentHistory
 import dev.swart.inklab.core.ink.autoRecognizeShape
 import dev.swart.inklab.core.ink.pointInPolygon
 import dev.swart.inklab.core.ink.selectionBounds
@@ -66,6 +67,12 @@ private data class DocumentSnapshot(
     val pageIndex: Int
 )
 
+private data class SaveRequest(
+    val sequence: Long,
+    val documents: List<InkBoard>,
+    val folders: List<InkFolder>
+)
+
 class EditorViewModel(application: Application) : AndroidViewModel(application) {
     private val boardRepository = BoardRepository(application)
     private val inputRepository = InputPreferencesRepository(application)
@@ -77,6 +84,10 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     val convertedObjects = mutableStateListOf<ConvertedInkObject>()
     val modelProgress = mutableStateMapOf<String, Float>()
     var saving by mutableStateOf(false)
+    var durableSaveSequence by mutableStateOf(0L)
+        private set
+    var localStorageSequence by mutableStateOf(0L)
+        private set
     private val modelRequests = mutableMapOf<String, Int>()
     var storageError by mutableStateOf<String?>(null)
     var pageManager by mutableStateOf(false)
@@ -90,9 +101,9 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     var viewportHeight = 1f
     var lastStylusTime = -10000L
     var stylusHover = false
-    private val saves = kotlinx.coroutines.channels.Channel<Pair<List<InkBoard>, List<InkFolder>>>(kotlinx.coroutines.channels.Channel.CONFLATED)
+    private val saves = kotlinx.coroutines.channels.Channel<SaveRequest>(kotlinx.coroutines.channels.Channel.CONFLATED)
+    private var requestedSaveSequence = 0L
     private var inputSnapshot: DocumentSnapshot? = null
-    private var inputUndoCount = 0
     val modelErrors = mutableStateMapOf<String, String>()
 
     var screen by mutableStateOf(AppScreen.BOARDS)
@@ -123,8 +134,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         private set
     var eraserCursor by mutableStateOf<Offset?>(null)
 
-    private val undo = ArrayDeque<DocumentSnapshot>()
-    private val redo = ArrayDeque<DocumentSnapshot>()
+    private val history = DocumentHistory()
     private var eraserGestureChanged = false
     private var movingSelection = false
     private var movingConverted = false
@@ -150,17 +160,26 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         folders += boardRepository.loadFolders()
         val loaded = boardRepository.load()
         storageError = boardRepository.loadError
+        localStorageSequence = boardRepository.lastCommittedSequence
         boards += if (loaded.isEmpty() && storageError == null) listOf(InkBoard(title = "Новая тетрадь", format = DocumentFormat.NOTEBOOK)) else loaded
         boards.firstOrNull { it.deletedAt == null }?.let { openBoard(it.id, persistPrevious = false) }
             ?: run { screen = AppScreen.BOARDS }
         screen = AppScreen.BOARDS
         viewModelScope.launch {
-            for ((documents, directories) in saves) {
+            for (request in saves) {
                 val result = kotlinx.coroutines.withContext(Dispatchers.IO) {
-                    runCatching { boardRepository.save(documents); boardRepository.saveFolders(directories) }
+                    runCatching { boardRepository.saveLibrary(request.documents, request.folders) }
                 }
-                storageError = result.exceptionOrNull()?.let { "Не удалось сохранить: ${it.message}" }
-                saving = false
+                if (result.isSuccess) {
+                    val receipt = result.getOrThrow()
+                    durableSaveSequence = maxOf(durableSaveSequence, request.sequence)
+                    localStorageSequence = receipt.sequence
+                    if (request.sequence == requestedSaveSequence) storageError = null
+                } else if (request.sequence == requestedSaveSequence) {
+                    storageError = result.exceptionOrNull()?.let { "Не удалось сохранить: ${it.message}" }
+                }
+                // A stale acknowledgement must not hide a newer pending edit.
+                saving = request.sequence != requestedSaveSequence
             }
         }
         if (loaded.isEmpty() && storageError == null) scheduleSave()
@@ -247,8 +266,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         convertedObjects.clear()
         convertedObjects += page.convertedObjects
         clearSelection()
-        undo.clear()
-        redo.clear()
+        history.clear()
         if (board.savedScale > 0) {
             viewportScale = board.savedScale
             viewportOffset = Offset(board.savedOffsetX, board.savedOffsetY)
@@ -271,6 +289,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 strokes.clear()
                 convertedObjects.clear()
                 clearSelection()
+                history.clear()
                 screen = AppScreen.BOARDS
             }
         }
@@ -325,7 +344,9 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         pushUndo()
         val pages = currentDocument().pages.toMutableList()
         val next = edit(pages)
-        replaceBoard(currentDocument().copy(pages = pages, lastPageIndex = next))
+        val updated = currentDocument().copy(pages = pages, lastPageIndex = next)
+        replaceBoard(updated)
+        history.commit(updated, next)
         loadPage(next)
         scrollToPage(next)
     }
@@ -351,9 +372,12 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     fun restorePage(pageId: String) {
         val board = boards.firstOrNull { it.deletedAt == null && it.trashedPages.any { page -> page.id == pageId } } ?: return
         val page = board.trashedPages.firstOrNull { it.id == pageId } ?: return
-        if (board.id == currentBoardId) { persistCurrentBoard(); pushUndo() }
+        val isCurrent = board.id == currentBoardId
+        if (isCurrent) { persistCurrentBoard(); pushUndo() }
         val source = boards.first { it.id == board.id }
-        replaceBoard(source.copy(pages = source.pages + page, trashedPages = source.trashedPages.filterNot { it.id == pageId }))
+        val updated = source.copy(pages = source.pages + page, trashedPages = source.trashedPages.filterNot { it.id == pageId })
+        replaceBoard(updated)
+        if (isCurrent) history.commit(updated, currentPageIndex)
         scheduleSave()
     }
     fun replaceBoard(board: InkBoard) {
@@ -449,10 +473,10 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         stylusInContact = active
         lastStylusTime = android.os.SystemClock.uptimeMillis()
     }
-    fun beginInput() { inputSnapshot = snapshot(); inputUndoCount = undo.size }
+    fun beginInput() { inputSnapshot = snapshot() }
     fun cancelInput() {
+        history.cancelPending()
         inputSnapshot?.let { restore(it) }
-        while (undo.size > inputUndoCount) undo.removeLast()
         currentPoints.clear(); lassoPoints.clear(); eraserCursor = null
         movingSelection = false; movingConverted = false; eraserGestureChanged = false
         inputSnapshot = null
@@ -586,9 +610,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         }
         if (after != before) {
             if (!eraserGestureChanged) {
-                undo.addLast(snapshot())
-                trimHistory(undo)
-                redo.clear()
+                pushUndo()
                 eraserGestureChanged = true
             }
             strokes.clear()
@@ -825,15 +847,17 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun undo() {
-        if (undo.isEmpty()) return
-        redo.addLast(snapshot())
-        restore(undo.removeLast())
+        val current = currentDocument()
+        val result = history.undo(current) ?: return
+        replaceBoard(result.board)
+        loadPage(result.pageIndex)
     }
 
     fun redo() {
-        if (redo.isEmpty()) return
-        undo.addLast(snapshot())
-        restore(redo.removeLast())
+        val current = currentDocument()
+        val result = history.redo(current) ?: return
+        replaceBoard(result.board)
+        loadPage(result.pageIndex)
     }
 
     fun clear() {
@@ -946,9 +970,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     private fun pushUndo() {
-        undo.addLast(snapshot())
-        trimHistory(undo)
-        redo.clear()
+        history.begin(currentDocument(), currentPageIndex)
     }
 
     private fun currentDocument(): InkBoard {
@@ -979,10 +1001,6 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         )
     }
 
-    private fun trimHistory(history: ArrayDeque<DocumentSnapshot>) {
-        while (history.size > 50) history.removeFirst()
-    }
-
     private fun persistCurrentBoard() {
         val index = boards.indexOfFirst { it.id == currentBoardId }
         if (index < 0) return
@@ -992,12 +1010,14 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         pages[currentPageIndex] = pages[currentPageIndex].copy(
             strokes = strokes.toList(), convertedObjects = convertedObjects.toList()
         )
-        boards[index] = board.copy(
+        val updated = board.copy(
             pages = pages,
             savedScale = viewportScale, savedOffsetX = viewportOffset.x, savedOffsetY = viewportOffset.y,
             lastPageIndex = currentPageIndex,
             updatedAt = System.currentTimeMillis()
         )
+        boards[index] = updated
+        history.commit(updated, currentPageIndex)
         scheduleSave()
     }
 
@@ -1021,8 +1041,9 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
 
     private fun scheduleSave() {
         if (boardRepository.loadError != null) return
+        requestedSaveSequence += 1L
         saving = true
-        saves.trySend(boards.toList() to folders.toList())
+        saves.trySend(SaveRequest(requestedSaveSequence, boards.toList(), folders.toList()))
     }
 
     private fun Rect.inflate(value: Float) = Rect(left - value, top - value, right + value, bottom + value)

@@ -19,6 +19,10 @@ on:
       - THIRD_PARTY_NOTICES.md
       - .github/workflows/publish-preview.yml
 
+concurrency:
+  group: inklab-preview-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: write
 
@@ -31,7 +35,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up Java
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
@@ -40,7 +44,7 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
 
       - name: Test, lint and build signed release
-        run: ./gradlew clean testDebugUnitTest lintRelease assembleRelease
+        run: ./gradlew clean testDebugUnitTest assembleDebugAndroidTest lintRelease assembleRelease
 
       - name: Verify release signature
         run: |
@@ -68,3 +72,36 @@ jobs:
             --title "InkLab Preview" \
             --notes-file .github/release-notes.md \
             --prerelease
+
+  storage-instrumentation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Check out sources
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Enable KVM
+        run: |
+          if [ -e /dev/kvm ]; then
+            sudo chmod 666 /dev/kvm
+          fi
+
+      - name: Run P1 storage tests on Android
+        uses: reactivecircus/android-emulator-runner@v2.38.0
+        with:
+          api-level: 35
+          target: aosp_atd
+          arch: x86_64
+          disable-animations: true
+          emulator-options: -no-window -no-snapshot-save -noaudio -no-boot-anim -gpu swiftshader_indirect
+          script: ./gradlew connectedDebugAndroidTest -PtestAbi=x86_64 '-Pandroid.testInstrumentationRunnerArguments.class=dev.swart.inklab.TransactionalStorageTest,dev.swart.inklab.P1StorageContractTest' --no-daemon
