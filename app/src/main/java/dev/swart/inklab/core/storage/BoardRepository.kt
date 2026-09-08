@@ -12,8 +12,12 @@ import dev.swart.inklab.core.model.InkFolder
 import dev.swart.inklab.core.model.InkPage
 import dev.swart.inklab.core.model.InkPoint
 import dev.swart.inklab.core.model.InkStroke
-import dev.swart.inklab.core.model.PaperPattern
+import dev.swart.inklab.core.model.PageBackground
+import dev.swart.inklab.core.model.PageBackgroundKind
+import dev.swart.inklab.core.model.PageBackgroundTransform
 import dev.swart.inklab.core.model.PageOrientation
+import dev.swart.inklab.core.model.PageSourceBox
+import dev.swart.inklab.core.model.PaperPattern
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -475,8 +479,48 @@ class BoardRepository(context: Context) {
         boards.forEach { board ->
             require(safeId(board.id)) { "Недопустимый documentId" }
             require(board.pages.isNotEmpty()) { "Документ не содержит страниц" }
-            val pageIds = (board.pages + board.trashedPages).map { it.id }
+            val pages = board.pages + board.trashedPages
+            val pageIds = pages.map { it.id }
             require(pageIds.distinct().size == pageIds.size) { "Повторяющийся pageId" }
+            pages.forEach { page -> validatePageBackground(page.background) }
+        }
+    }
+
+    private fun validatePageBackground(background: PageBackground?) {
+        if (background == null) return
+        val matrix = background.transform
+        require(listOf(matrix.a, matrix.b, matrix.c, matrix.d, matrix.tx, matrix.ty).all(Float::isFinite)) {
+            "Фон страницы содержит нечисловую матрицу"
+        }
+        require(background.sourceRotationDegrees in setOf(0, 90, 180, 270)) {
+            "Неподдерживаемый поворот фона страницы"
+        }
+        background.assetId?.let { require(safeId(it)) { "Недопустимый assetId" } }
+        background.sourceBox?.let { box ->
+            require(listOf(box.left, box.top, box.right, box.bottom).all(Float::isFinite)) { "Некорректный sourceBox" }
+            require(box.width > 0f && box.height > 0f) { "Пустой sourceBox" }
+        }
+        background.paper?.let { settings ->
+            require(settings.spacing.isFinite() && settings.spacing in 1f..10_000f) { "Некорректный шаг бумаги" }
+        }
+        when (background.kind) {
+            PageBackgroundKind.PAPER -> {
+                require(background.paper != null) { "PAPER-фон не содержит настроек бумаги" }
+                require(background.assetId == null && background.sourcePageIndex == null && background.sourceBox == null) {
+                    "PAPER-фон не должен ссылаться на asset"
+                }
+            }
+            PageBackgroundKind.PDF -> {
+                require(!background.assetId.isNullOrBlank()) { "PDF-фон не содержит assetId" }
+                require(background.sourcePageIndex != null && background.sourcePageIndex >= 0) { "PDF-фон не содержит номер страницы" }
+                require(background.sourceBox != null) { "PDF-фон не содержит sourceBox" }
+                require(background.paper == null) { "PDF-фон не должен содержать paper-настройки" }
+            }
+            PageBackgroundKind.IMAGE -> {
+                require(!background.assetId.isNullOrBlank()) { "IMAGE-фон не содержит assetId" }
+                require(background.sourcePageIndex == null) { "IMAGE-фон не должен содержать номер PDF-страницы" }
+                require(background.paper == null) { "IMAGE-фон не должен содержать paper-настройки" }
+            }
         }
     }
 
@@ -496,6 +540,21 @@ class BoardRepository(context: Context) {
         }
     }
 
+    private fun BoardSettings.toJson() = JSONObject().apply {
+        put("pattern", pattern.name)
+        put("spacing", spacing.toDouble())
+        put("paperColor", paperColor)
+        put("showMargin", showMargin)
+    }
+
+    private fun JSONObject.toBoardSettings(fallback: BoardSettings = BoardSettings()) = BoardSettings(
+        pattern = runCatching { PaperPattern.valueOf(optString("pattern", fallback.pattern.name)) }
+            .getOrDefault(fallback.pattern),
+        spacing = optDouble("spacing", fallback.spacing.toDouble()).toFloat(),
+        paperColor = optLong("paperColor", fallback.paperColor),
+        showMargin = optBoolean("showMargin", fallback.showMargin)
+    )
+
     /** Durable document metadata. Viewport scale/offset are intentionally excluded. */
     private fun InkBoard.metadataJson() = JSONObject().apply {
         put("schemaVersion", BOARD_SCHEMA_VERSION)
@@ -511,12 +570,7 @@ class BoardRepository(context: Context) {
         put("orientation", orientation.name)
         put("lastPageIndex", lastPageIndex)
         put("folderId", folderId ?: JSONObject.NULL)
-        put("settings", JSONObject().apply {
-            put("pattern", settings.pattern.name)
-            put("spacing", settings.spacing.toDouble())
-            put("paperColor", settings.paperColor)
-            put("showMargin", settings.showMargin)
-        })
+        put("settings", settings.toJson())
     }
 
     private fun InkBoard.toJson() = metadataJson().apply {
@@ -530,8 +584,33 @@ class BoardRepository(context: Context) {
         put("height", height.toDouble())
         put("originX", originX.toDouble())
         put("originY", originY.toDouble())
+        background?.let { put("background", it.toJson()) }
         put("strokes", JSONArray().apply { this@toJson.strokes.forEach { put(it.toJson()) } })
         put("convertedObjects", convertedObjects.toJson())
+    }
+
+    private fun PageBackground.toJson() = JSONObject().apply {
+        put("kind", kind.name)
+        paper?.let { put("paper", it.toJson()) }
+        assetId?.let { put("assetId", it) }
+        sourcePageIndex?.let { put("sourcePageIndex", it) }
+        sourceBox?.let { box ->
+            put("sourceBox", JSONObject().apply {
+                put("left", box.left.toDouble())
+                put("top", box.top.toDouble())
+                put("right", box.right.toDouble())
+                put("bottom", box.bottom.toDouble())
+            })
+        }
+        put("sourceRotationDegrees", sourceRotationDegrees)
+        put("transform", JSONObject().apply {
+            put("a", transform.a.toDouble())
+            put("b", transform.b.toDouble())
+            put("c", transform.c.toDouble())
+            put("d", transform.d.toDouble())
+            put("tx", transform.tx.toDouble())
+            put("ty", transform.ty.toDouble())
+        })
     }
 
     private fun pagesJson(pages: List<InkPage>) = JSONArray().apply {
@@ -593,19 +672,45 @@ class BoardRepository(context: Context) {
         )
     }
 
+    private fun JSONObject.toPageBackground(): PageBackground {
+        val kindName = getString("kind")
+        val kind = runCatching { PageBackgroundKind.valueOf(kindName) }
+            .getOrElse { throw IllegalArgumentException("Неизвестный тип фона страницы: $kindName", it) }
+        val box = optJSONObject("sourceBox")?.let { source ->
+            PageSourceBox(
+                left = source.getDouble("left").toFloat(),
+                top = source.getDouble("top").toFloat(),
+                right = source.getDouble("right").toFloat(),
+                bottom = source.getDouble("bottom").toFloat()
+            )
+        }
+        val matrix = optJSONObject("transform")?.let { source ->
+            PageBackgroundTransform(
+                a = source.optDouble("a", 1.0).toFloat(),
+                b = source.optDouble("b", 0.0).toFloat(),
+                c = source.optDouble("c", 0.0).toFloat(),
+                d = source.optDouble("d", 1.0).toFloat(),
+                tx = source.optDouble("tx", 0.0).toFloat(),
+                ty = source.optDouble("ty", 0.0).toFloat()
+            )
+        } ?: PageBackgroundTransform()
+        return PageBackground(
+            kind = kind,
+            paper = optJSONObject("paper")?.toBoardSettings(),
+            assetId = optString("assetId", "").takeIf { it.isNotBlank() && it != "null" },
+            sourcePageIndex = if (has("sourcePageIndex") && !isNull("sourcePageIndex")) getInt("sourcePageIndex") else null,
+            sourceBox = box,
+            sourceRotationDegrees = optInt("sourceRotationDegrees", 0),
+            transform = matrix
+        ).also(::validatePageBackground)
+    }
+
     private fun JSONObject.toBoard(): InkBoard {
         val schemaVersion = optInt("schemaVersion", 1)
         require(schemaVersion in 1..BOARD_SCHEMA_VERSION) {
             "Схема документа $schemaVersion новее поддерживаемой $BOARD_SCHEMA_VERSION"
         }
-        val settingsJson = optJSONObject("settings") ?: JSONObject()
-        val settings = BoardSettings(
-            pattern = runCatching { PaperPattern.valueOf(settingsJson.optString("pattern", PaperPattern.RULED.name)) }
-                .getOrDefault(PaperPattern.RULED),
-            spacing = settingsJson.optDouble("spacing", 36.0).toFloat(),
-            paperColor = settingsJson.optLong("paperColor", 0xFFFBF9F5),
-            showMargin = settingsJson.optBoolean("showMargin", false)
-        )
+        val settings = (optJSONObject("settings") ?: JSONObject()).toBoardSettings()
         fun parseConverted(convertedJson: JSONArray): List<ConvertedInkObject> = List(convertedJson.length()) { itemIndex ->
             val item = convertedJson.getJSONObject(itemIndex)
             val sourceJson = item.optJSONArray("sourceStrokes") ?: JSONArray()
@@ -643,7 +748,8 @@ class BoardRepository(context: Context) {
                 width = page.optDouble("width", width.toDouble()).toFloat().coerceAtLeast(1f),
                 height = page.optDouble("height", (width / ratio).toDouble()).toFloat().coerceAtLeast(1f),
                 originX = page.optDouble("originX", (left - (right - left) * 0.025f).toDouble()).toFloat(),
-                originY = page.optDouble("originY", (top - (bottom - top) * 0.025f).toDouble()).toFloat()
+                originY = page.optDouble("originY", (top - (bottom - top) * 0.025f).toDouble()).toFloat(),
+                background = page.optJSONObject("background")?.toPageBackground()
             )
         }
 
@@ -655,6 +761,7 @@ class BoardRepository(context: Context) {
         (pages + trashed).forEach { page ->
             require(page.width.isFinite() && page.height.isFinite() && page.width in 1f..1_000_000f && page.height in 1f..1_000_000f)
             require(page.originX.isFinite() && page.originY.isFinite())
+            validatePageBackground(page.background)
             (page.strokes + page.convertedObjects.flatMap { it.sourceStrokes }).forEach { stroke ->
                 require(stroke.width.isFinite() && stroke.width > 0f)
                 require(stroke.points.all { it.x.isFinite() && it.y.isFinite() && it.pressure.isFinite() && it.tilt.isFinite() })
@@ -693,7 +800,7 @@ class BoardRepository(context: Context) {
     private fun safeId(value: String) = value.matches(Regex("[a-zA-Z0-9-]+"))
 
     companion object {
-        private const val BOARD_SCHEMA_VERSION = 2
+        private const val BOARD_SCHEMA_VERSION = 3
         private const val JOURNAL_MUTATION_VERSION = 2
         private const val CHECKPOINT_ENTRY_LIMIT = 32
         private const val CHECKPOINT_BYTES_LIMIT = 4L * 1024L * 1024L
