@@ -3,8 +3,11 @@ package dev.swart.inklab
 import android.app.Application
 import android.content.Context
 import android.content.SharedPreferences
+import android.graphics.Bitmap
+import android.graphics.Canvas
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import dev.swart.inklab.core.export.PageRenderer
 import dev.swart.inklab.core.model.BoardSettings
 import dev.swart.inklab.core.model.DocumentFormat
 import dev.swart.inklab.core.model.InkBoard
@@ -167,6 +170,29 @@ class P1StorageContractTest {
         val failure = runCatching { repo.decode(root.toString()) }.exceptionOrNull()
         assertTrue(failure is IllegalArgumentException)
         assertTrue(failure?.message.orEmpty().contains("поворот"))
+    }
+
+    @Test
+    fun pageRendererUsesPagePaperOverride() {
+        val documentDefaults = BoardSettings(
+            pattern = PaperPattern.BLANK,
+            paperColor = 0xFF112233
+        )
+        val pageSettings = BoardSettings(
+            pattern = PaperPattern.BLANK,
+            paperColor = 0xFFEEDDCC
+        )
+        val page = InkPage(
+            id = "render-page",
+            width = 64f,
+            height = 64f,
+            background = PageBackground.paper(pageSettings)
+        )
+        val bitmap = Bitmap.createBitmap(64, 64, Bitmap.Config.ARGB_8888)
+
+        PageRenderer.draw(Canvas(bitmap), page, documentDefaults)
+
+        assertEquals(pageSettings.paperColor.toInt(), bitmap.getPixel(20, 20))
     }
 
     @Test
