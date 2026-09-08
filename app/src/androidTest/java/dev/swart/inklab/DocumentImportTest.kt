@@ -50,7 +50,8 @@ class DocumentImportTest {
     @Test
     fun pdfAssetCreatesOnePagePerSourcePageWithOneStableAssetReference() {
         val source = File(context.filesDir, "lecture.pdf")
-        PdfDocument().use { document ->
+        val document = PdfDocument()
+        try {
             val portrait = document.startPage(PdfDocument.PageInfo.Builder(600, 800, 1).create())
             portrait.canvas.drawText("Page one", 30f, 40f, android.graphics.Paint())
             document.finishPage(portrait)
@@ -58,6 +59,8 @@ class DocumentImportTest {
             landscape.canvas.drawText("Page two", 30f, 40f, android.graphics.Paint())
             document.finishPage(landscape)
             source.outputStream().use(document::writeTo)
+        } finally {
+            document.close()
         }
 
         val asset = AssetStore(context).import(source.inputStream(), AssetKind.PDF)
@@ -136,16 +139,11 @@ class DocumentImportTest {
         require(jpeg.size > 2 && jpeg[0] == 0xff.toByte() && jpeg[1] == 0xd8.toByte())
         require(orientation in 1..8)
         val payload = byteArrayOf(
-            // Exif header.
             0x45, 0x78, 0x69, 0x66, 0x00, 0x00,
-            // Little-endian TIFF header, first IFD at offset 8.
             0x49, 0x49, 0x2a, 0x00, 0x08, 0x00, 0x00, 0x00,
-            // One IFD entry.
             0x01, 0x00,
-            // Tag 0x0112 (Orientation), SHORT, count 1, inline value.
             0x12, 0x01, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00,
             orientation.toByte(), 0x00, 0x00, 0x00,
-            // No next IFD.
             0x00, 0x00, 0x00, 0x00
         )
         val output = ByteArrayOutputStream(jpeg.size + payload.size + 4)
