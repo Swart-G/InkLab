@@ -7,8 +7,15 @@ import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.lifecycle.ViewModelProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import dev.swart.inklab.core.model.DocumentFormat
+import dev.swart.inklab.core.model.InkPoint
+import dev.swart.inklab.core.model.InkStroke
 import dev.swart.inklab.core.model.PageOrientation
+import dev.swart.inklab.core.recognition.RecognitionMode
+import dev.swart.inklab.core.recognition.RecognitionResult
+import dev.swart.inklab.core.recognition.RecognitionSourceState
 import dev.swart.inklab.ui.EditorViewModel
+import dev.swart.inklab.ui.UiRecognition
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Rule
 import org.junit.Test
@@ -97,5 +104,63 @@ class EditorUiTest {
         compose.onNodeWithContentDescription("Действия с документом").performClick()
         compose.onNodeWithText("Экспорт текущей страницы в PDF").assertDoesNotExist()
         compose.onNodeWithText("Сохранить резервную копию с аудио").assertDoesNotExist()
+    }
+
+    @Test
+    fun ocrConflictNeverDeletesChangedHandwritingAndCopyIsUndoable() {
+        compose.runOnUiThread {
+            val vm = ViewModelProvider(compose.activity)[EditorViewModel::class.java]
+            vm.createDocument(
+                title = "OCR race",
+                format = DocumentFormat.NOTEBOOK,
+                orientation = PageOrientation.PORTRAIT
+            )
+
+            val original = InkStroke(
+                id = "ocr-source",
+                points = listOf(
+                    InkPoint(40f, 60f, 1L),
+                    InkPoint(140f, 60f, 2L)
+                )
+            )
+            vm.strokes.clear()
+            vm.strokes += original
+            vm.flush()
+
+            val changed = original.copy(points = original.points.map { it.copy(x = it.x + 30f) })
+            vm.strokes[0] = changed
+            vm.flush()
+
+            val pageId = vm.currentBoard!!.pages[vm.currentPageIndex].id
+            vm.recognition = UiRecognition(
+                mode = RecognitionMode.TEXT,
+                result = RecognitionResult(
+                    primary = "готовый текст",
+                    latencyMs = 1L,
+                    providerId = "test"
+                ),
+                sourceIds = setOf(original.id),
+                documentId = vm.currentBoardId,
+                pageId = pageId,
+                originalStrokes = listOf(original)
+            )
+
+            vm.applyRecognition()
+
+            assertEquals(RecognitionSourceState.SOURCE_CHANGED, vm.recognition?.sourceState)
+            assertEquals(listOf(changed), vm.strokes.toList())
+            assertTrue(vm.convertedObjects.isEmpty())
+
+            vm.applyRecognitionAsCopy()
+
+            assertEquals(listOf(changed), vm.strokes.toList())
+            assertEquals(1, vm.convertedObjects.size)
+            assertEquals(listOf(original), vm.convertedObjects.single().sourceStrokes)
+
+            vm.undo()
+
+            assertEquals(listOf(changed), vm.strokes.toList())
+            assertTrue(vm.convertedObjects.isEmpty())
+        }
     }
 }
