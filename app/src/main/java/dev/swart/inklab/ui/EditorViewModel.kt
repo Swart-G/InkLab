@@ -33,6 +33,7 @@ import dev.swart.inklab.core.model.InkPage
 import dev.swart.inklab.core.model.InkPoint
 import dev.swart.inklab.core.model.InkStroke
 import dev.swart.inklab.core.model.PageOrientation
+import dev.swart.inklab.core.model.PageStripLayout
 import dev.swart.inklab.core.recognition.RecognitionMode
 import dev.swart.inklab.core.recognition.RecognitionResult
 import dev.swart.inklab.core.recognition.RecognitionSourceState
@@ -505,32 +506,43 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     }
     fun endInput() { inputSnapshot = null }
     val notebook get() = currentBoard?.format == DocumentFormat.NOTEBOOK
-    fun pageTop(index: Int): Float = currentBoard?.pages?.take(index)?.sumOf { (it.height + 28f).toDouble() }?.toFloat() ?: 0f
-    fun pageLeft(index: Int): Float {
-        val pages = currentBoard?.pages ?: return 0f
-        return ((pages.maxOfOrNull { it.width } ?: 1000f) - (pages.getOrNull(index)?.width ?: 1000f)) / 2f
-    }
+
+    private fun pageStripLayout(): PageStripLayout = PageStripLayout.from(currentBoard?.pages.orEmpty())
+
+    fun pageTop(index: Int): Float = pageStripLayout().placement(index)?.stripTop ?: 0f
+
+    fun pageLeft(index: Int): Float = pageStripLayout().placement(index)?.stripLeft ?: 0f
+
     fun pageAt(screen: Offset): Int? {
         if (!notebook) return currentPageIndex
-        val world = (screen - viewportOffset) / viewportScale
-        return currentBoard?.pages?.indices?.firstOrNull { i ->
-            val p = currentBoard!!.pages[i]
-            world.x in pageLeft(i)..(pageLeft(i)+p.width) && world.y in pageTop(i)..(pageTop(i)+p.height)
-        }
+        return pageStripLayout().pageAtScreen(screen, viewportScale, viewportOffset)
     }
+
     fun screenToCanvas(point: Offset): Offset {
         val world = (point - viewportOffset) / viewportScale
-        val page = currentBoard?.pages?.getOrNull(currentPageIndex)
-        return if (notebook && page != null) world - Offset(pageLeft(currentPageIndex), pageTop(currentPageIndex)) + Offset(page.originX, page.originY) else world
+        if (!notebook) return world
+        return pageStripLayout().screenToPageLocal(
+            currentPageIndex,
+            point,
+            viewportScale,
+            viewportOffset
+        ) ?: world
     }
+
     fun canvasToScreen(point: Offset): Offset {
-        val page = currentBoard?.pages?.getOrNull(currentPageIndex)
-        val world = if (notebook && page != null) point + Offset(pageLeft(currentPageIndex)-page.originX, pageTop(currentPageIndex)-page.originY) else point
-        return world * viewportScale + viewportOffset
+        if (!notebook) return point * viewportScale + viewportOffset
+        return pageStripLayout().pageLocalToScreen(
+            currentPageIndex,
+            point,
+            viewportScale,
+            viewportOffset
+        ) ?: (point * viewportScale + viewportOffset)
     }
+
     fun panBy(delta: Offset) {
-        viewportOffset += delta; constrainViewport()
-        if (notebook) pageAt(Offset(viewportWidth/2,viewportHeight/2))?.let { activatePage(it) }
+        viewportOffset += delta
+        constrainViewport()
+        if (notebook) pageAt(Offset(viewportWidth / 2, viewportHeight / 2))?.let { activatePage(it) }
     }
     fun flush() { persistCurrentBoard() }
     fun zoomBy(factor: Float, centroid: Offset) {
@@ -539,7 +551,11 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         viewportOffset = centroid - anchor * viewportScale
         constrainViewport()
     }
-    private fun fitScale() = ((viewportWidth - 32f).coerceAtLeast(1f) / (currentBoard?.pages?.maxOfOrNull { it.width } ?: 1000f)).coerceAtMost(6f)
+    private fun fitScale(): Float {
+        val contentWidth = if (notebook) pageStripLayout().width.takeIf { it > 0f } ?: 1000f
+        else currentBoard?.pages?.maxOfOrNull { it.width } ?: 1000f
+        return ((viewportWidth - 32f).coerceAtLeast(1f) / contentWidth).coerceAtMost(6f)
+    }
     fun resizeViewport(width: Float, height: Float) {
         val first = viewportWidth <= 1f
         val center = (Offset(viewportWidth/2, viewportHeight/2) - viewportOffset) / viewportScale
@@ -564,14 +580,16 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     }
     private fun scrollToPage(index: Int) {
         if (!notebook) return
-        viewportOffset = Offset(viewportOffset.x, 16f - pageTop(index)*viewportScale)
+        val placement = pageStripLayout().placement(index) ?: return
+        viewportOffset = Offset(viewportOffset.x, 16f - placement.stripTop * viewportScale)
         constrainViewport()
     }
     private fun constrainViewport() {
         if (!notebook) return
-        val pages = currentBoard?.pages ?: return
-        val width = (pages.maxOfOrNull { it.width } ?: 1000f)*viewportScale
-        val height = (pages.sumOf { (it.height+28f).toDouble() }.toFloat()-28f)*viewportScale
+        val layout = pageStripLayout()
+        if (layout.placements.isEmpty()) return
+        val width = layout.width * viewportScale
+        val height = layout.height * viewportScale
         viewportOffset = Offset(
             if (width < viewportWidth-32f) (viewportWidth-width)/2f else viewportOffset.x.coerceIn(viewportWidth-width-16f, 16f),
             viewportOffset.y.coerceIn(minOf(16f, viewportHeight-height-16f),16f)
