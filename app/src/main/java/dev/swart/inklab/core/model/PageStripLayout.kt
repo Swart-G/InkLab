@@ -69,8 +69,32 @@ data class PageStripLayout(
     companion object {
         const val DEFAULT_GAP = 28f
 
+        private data class CacheEntry(
+            val pages: List<InkPage>,
+            val gap: Float,
+            val layout: PageStripLayout
+        )
+
+        /**
+         * The editor replaces its page list on every committed document mutation. Reusing the
+         * layout while that exact list instance is stable keeps S Pen historical-point transforms
+         * allocation-free without tying the cache to stroke/object equality.
+         */
+        @Volatile
+        private var cacheEntry: CacheEntry? = null
+
         fun from(pages: List<InkPage>, gap: Float = DEFAULT_GAP): PageStripLayout {
             require(gap.isFinite() && gap >= 0f) { "Page gap must be finite and non-negative" }
+            cacheEntry?.let { cached ->
+                if (cached.pages === pages && cached.gap == gap) return cached.layout
+            }
+
+            val layout = build(pages, gap)
+            cacheEntry = CacheEntry(pages, gap, layout)
+            return layout
+        }
+
+        private fun build(pages: List<InkPage>, gap: Float): PageStripLayout {
             if (pages.isEmpty()) return PageStripLayout(emptyList(), 0f, 0f, gap)
 
             pages.forEach { page ->
