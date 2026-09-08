@@ -70,6 +70,27 @@ class TransactionalStorageTest {
     }
 
     @Test
+    fun nextAppendRepairsPreviouslyTruncatedTail() {
+        val original = InkBoard(id = "document", title = "Original", format = DocumentFormat.NOTEBOOK)
+        val seed = BoardRepository(app)
+        seed.saveLibrary(listOf(original), emptyList())
+        val confirmed = seed.saveLibrary(listOf(original.copy(title = "Confirmed")), emptyList())
+        val journal = File(app.filesDir, "library-store-v1/journal.ndjson")
+        journal.appendText("{\"sequence\":${confirmed.sequence + 1},\"sha256\":\"partial")
+
+        val resumed = BoardRepository(app)
+        assertEquals("Confirmed", resumed.load().single().title)
+        val final = resumed.saveLibrary(listOf(original.copy(title = "After repair")), emptyList())
+        assertTrue(final.sequence > confirmed.sequence)
+
+        val restored = BoardRepository(app)
+        assertEquals("After repair", restored.load().single().title)
+        assertEquals(final.sequence, restored.lastCommittedSequence)
+        val lines = journal.readLines().filter { it.isNotBlank() }
+        assertTrue(lines.all { runCatching { JSONObject(it) }.isSuccess })
+    }
+
+    @Test
     fun corruptedNewestCheckpointRebuildsFromPreviousCheckpointAndJournal() {
         val repo = BoardRepository(app)
         val original = InkBoard(id = "document", title = "Original", format = DocumentFormat.NOTEBOOK)
