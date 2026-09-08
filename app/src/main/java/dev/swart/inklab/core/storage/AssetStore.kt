@@ -5,6 +5,7 @@ import android.net.Uri
 import android.util.AtomicFile
 import org.json.JSONObject
 import java.io.File
+import java.io.FileNotFoundException
 import java.io.FileOutputStream
 import java.io.InputStream
 import java.security.MessageDigest
@@ -184,8 +185,11 @@ class AssetStore(private val context: Context) {
         verifyContent: Boolean = false
     ): StoredAsset? {
         val atomic = AtomicFile(source)
-        if (!atomic.exists()) return null
-        val text = atomic.openRead().bufferedReader(Charsets.UTF_8).use { it.readText() }
+        val text = try {
+            atomic.openRead().bufferedReader(Charsets.UTF_8).use { it.readText() }
+        } catch (_: FileNotFoundException) {
+            return null
+        }
         val json = JSONObject(text)
         require(json.getInt("version") == METADATA_VERSION) { "Неподдерживаемая версия asset metadata" }
         val id = json.getString("id")
