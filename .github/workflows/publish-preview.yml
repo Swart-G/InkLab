@@ -19,6 +19,10 @@ on:
       - THIRD_PARTY_NOTICES.md
       - .github/workflows/publish-preview.yml
 
+concurrency:
+  group: inklab-preview-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
 permissions:
   contents: write
 
