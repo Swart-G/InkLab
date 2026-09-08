@@ -56,6 +56,7 @@ internal class DurableLibraryJournal(private val file: File) {
 
     @Synchronized
     fun read(afterSequence: Long = 0L): JournalReadResult {
+        require(afterSequence >= 0L)
         if (!file.isFile && !backupFile.isFile) return JournalReadResult(emptyList(), false)
         val lines = runCatching {
             atomicFile.openRead().bufferedReader(Charsets.UTF_8).use { it.readLines() }
@@ -74,9 +75,18 @@ internal class DurableLibraryJournal(private val file: File) {
                 trailing = true
                 return@forEachIndexed
             }
-            require(parsed.sequence > previous) { "Нарушен порядок journal sequence" }
+            if (previous != 0L) {
+                require(parsed.sequence == previous + 1L) {
+                    "Разрыв journal sequence: ожидалось ${previous + 1L}, получено ${parsed.sequence}"
+                }
+            }
             previous = parsed.sequence
             if (parsed.sequence > afterSequence) entries += parsed
+        }
+        if (afterSequence > 0L && entries.isNotEmpty()) {
+            require(entries.first().sequence == afterSequence + 1L) {
+                "Journal replay начинается не с ${afterSequence + 1L}: ${entries.first().sequence}"
+            }
         }
         return JournalReadResult(entries, trailing)
     }
