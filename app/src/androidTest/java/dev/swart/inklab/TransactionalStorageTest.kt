@@ -43,6 +43,19 @@ class TransactionalStorageTest {
     }
 
     @Test
+    fun legacyArrayMigrationPublishesCheckpointAndPreservesSourceBackup() {
+        val legacy = InkBoard(id = "legacy-document", title = "Legacy", format = DocumentFormat.NOTEBOOK)
+        val encoder = BoardRepository(app)
+        File(app.filesDir, "boards.json").writeText(encoder.encode(listOf(legacy)))
+
+        val migrated = BoardRepository(app)
+        assertEquals(listOf(legacy), migrated.load())
+        assertTrue(File(app.filesDir, "migration-v1/boards.json").isFile)
+        assertTrue(File(app.filesDir, "library-store-v1/CURRENT").isFile)
+        assertEquals(listOf(legacy), BoardRepository(app).load())
+    }
+
+    @Test
     fun journalMutationSurvivesRepositoryRestartBeforeCheckpoint() {
         val repo = BoardRepository(app)
         val original = InkBoard(id = "document", title = "Original", format = DocumentFormat.NOTEBOOK)
@@ -54,6 +67,25 @@ class TransactionalStorageTest {
         val restored = BoardRepository(app)
         assertEquals("Journalled", restored.load().single().title)
         assertEquals(changed.sequence, restored.lastCommittedSequence)
+    }
+
+    @Test
+    fun failedJournalAppendDoesNotAdvanceDurableStateAndCanRetry() {
+        val repo = BoardRepository(app)
+        val original = InkBoard(id = "document", title = "Original", format = DocumentFormat.NOTEBOOK)
+        val initial = repo.saveLibrary(listOf(original), emptyList())
+        val changed = original.copy(title = "Changed")
+        val journalPath = File(app.filesDir, "library-store-v1/journal.ndjson")
+        assertTrue(journalPath.mkdirs())
+
+        assertTrue(runCatching { repo.saveLibrary(listOf(changed), emptyList()) }.isFailure)
+        assertEquals(initial.sequence, repo.lastCommittedSequence)
+        assertEquals("Original", BoardRepository(app).load().single().title)
+
+        assertTrue(journalPath.deleteRecursively())
+        val retry = repo.saveLibrary(listOf(changed), emptyList())
+        assertTrue(retry.sequence > initial.sequence)
+        assertEquals("Changed", BoardRepository(app).load().single().title)
     }
 
     @Test
