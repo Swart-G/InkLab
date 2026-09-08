@@ -31,7 +31,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Set up Java
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: "17"
@@ -68,3 +68,36 @@ jobs:
             --title "InkLab Preview" \
             --notes-file .github/release-notes.md \
             --prerelease
+
+  storage-instrumentation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Check out sources
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Enable KVM
+        run: |
+          if [ -e /dev/kvm ]; then
+            sudo chmod 666 /dev/kvm
+          fi
+
+      - name: Run transactional storage tests on Android
+        uses: reactivecircus/android-emulator-runner@v2.38.0
+        with:
+          api-level: 35
+          target: aosp_atd
+          arch: x86_64
+          disable-animations: true
+          emulator-options: -no-window -no-snapshot-save -noaudio -no-boot-anim -gpu swiftshader_indirect
+          script: ./gradlew connectedDebugAndroidTest -PtestAbi=x86_64 -Pandroid.testInstrumentationRunnerArguments.class=dev.swart.inklab.TransactionalStorageTest --no-daemon
