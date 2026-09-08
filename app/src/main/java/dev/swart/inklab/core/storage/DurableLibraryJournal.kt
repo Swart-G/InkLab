@@ -23,6 +23,11 @@ internal class DurableLibraryJournal(private val file: File) {
 
     val hasData: Boolean get() =
         (file.isFile && file.length() > 0L) || (backupFile.isFile && backupFile.length() > 0L)
+    val sizeBytes: Long get() = when {
+        file.isFile -> file.length()
+        backupFile.isFile -> backupFile.length()
+        else -> 0L
+    }
 
     @Synchronized
     fun append(sequence: Long, payload: String): DurableJournalEntry {
