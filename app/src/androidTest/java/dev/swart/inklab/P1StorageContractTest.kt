@@ -5,11 +5,17 @@ import android.content.Context
 import android.content.SharedPreferences
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
+import dev.swart.inklab.core.model.BoardSettings
 import dev.swart.inklab.core.model.DocumentFormat
 import dev.swart.inklab.core.model.InkBoard
 import dev.swart.inklab.core.model.InkPage
 import dev.swart.inklab.core.model.InkPoint
 import dev.swart.inklab.core.model.InkStroke
+import dev.swart.inklab.core.model.PageBackground
+import dev.swart.inklab.core.model.PageBackgroundKind
+import dev.swart.inklab.core.model.PageBackgroundTransform
+import dev.swart.inklab.core.model.PageSourceBox
+import dev.swart.inklab.core.model.PaperPattern
 import dev.swart.inklab.core.storage.BoardRepository
 import org.json.JSONArray
 import org.json.JSONObject
@@ -65,6 +71,102 @@ class P1StorageContractTest {
         assertFalse(encoded.contains("savedScale"))
         assertFalse(encoded.contains("savedOffsetX"))
         assertFalse(encoded.contains("savedOffsetY"))
+    }
+
+    @Test
+    fun pageBackgroundSchemaV3RoundTripsPaperPdfAndImage() {
+        val repo = BoardRepository(app)
+        val paperSettings = BoardSettings(
+            pattern = PaperPattern.GRID,
+            spacing = 18f,
+            paperColor = 0xFFFDF0D0,
+            showMargin = true
+        )
+        val pdfBackground = PageBackground(
+            kind = PageBackgroundKind.PDF,
+            assetId = "pdf-asset",
+            sourcePageIndex = 4,
+            sourceBox = PageSourceBox(12f, 24f, 612f, 824f),
+            sourceRotationDegrees = 90,
+            transform = PageBackgroundTransform(a = 0f, b = 1f, c = -1f, d = 0f, tx = 824f, ty = 0f)
+        )
+        val imageBackground = PageBackground(
+            kind = PageBackgroundKind.IMAGE,
+            assetId = "image-asset",
+            sourceBox = PageSourceBox(0f, 0f, 1920f, 1080f),
+            transform = PageBackgroundTransform(a = 0.5f, d = 0.5f, tx = 14f, ty = 28f)
+        )
+        val original = InkBoard(
+            id = "background-document",
+            format = DocumentFormat.NOTEBOOK,
+            pages = listOf(
+                InkPage(id = "paper-page", background = PageBackground.paper(paperSettings)),
+                InkPage(id = "pdf-page", background = pdfBackground),
+                InkPage(id = "image-page", background = imageBackground)
+            )
+        )
+
+        val encoded = repo.encode(listOf(original))
+        assertEquals(3, JSONArray(encoded).getJSONObject(0).getInt("schemaVersion"))
+        assertEquals(original, repo.decode(encoded).single())
+    }
+
+    @Test
+    fun schemaV2WithoutPageBackgroundMigratesToInheritedPaper() {
+        val repo = BoardRepository(app)
+        val defaults = BoardSettings(
+            pattern = PaperPattern.DOTS,
+            spacing = 22f,
+            paperColor = 0xFFF7F4EA,
+            showMargin = true
+        )
+        val current = InkBoard(
+            id = "legacy-background-document",
+            format = DocumentFormat.NOTEBOOK,
+            settings = defaults,
+            pages = listOf(InkPage(id = "legacy-page"))
+        )
+        val legacy = JSONArray(repo.encode(listOf(current))).getJSONObject(0).apply {
+            put("schemaVersion", 2)
+            getJSONArray("pages").getJSONObject(0).remove("background")
+        }
+
+        val restored = repo.decode(JSONArray().put(legacy).toString()).single()
+        assertEquals(null, restored.pages.single().background)
+        assertEquals(defaults, restored.pages.single().resolvedPaperSettings(restored.settings))
+        val migrated = JSONArray(repo.encode(listOf(restored))).getJSONObject(0)
+        assertEquals(3, migrated.getInt("schemaVersion"))
+        assertFalse(migrated.getJSONArray("pages").getJSONObject(0).has("background"))
+    }
+
+    @Test
+    fun corruptPdfPageBackgroundIsRejected() {
+        val repo = BoardRepository(app)
+        val board = InkBoard(
+            id = "corrupt-background-document",
+            format = DocumentFormat.NOTEBOOK,
+            pages = listOf(
+                InkPage(
+                    id = "pdf-page",
+                    background = PageBackground(
+                        kind = PageBackgroundKind.PDF,
+                        assetId = "pdf-asset",
+                        sourcePageIndex = 0,
+                        sourceBox = PageSourceBox(0f, 0f, 595f, 842f)
+                    )
+                )
+            )
+        )
+        val root = JSONArray(repo.encode(listOf(board)))
+        root.getJSONObject(0)
+            .getJSONArray("pages")
+            .getJSONObject(0)
+            .getJSONObject("background")
+            .put("sourceRotationDegrees", 45)
+
+        val failure = runCatching { repo.decode(root.toString()) }.exceptionOrNull()
+        assertTrue(failure is IllegalArgumentException)
+        assertTrue(failure?.message.orEmpty().contains("поворот"))
     }
 
     @Test
