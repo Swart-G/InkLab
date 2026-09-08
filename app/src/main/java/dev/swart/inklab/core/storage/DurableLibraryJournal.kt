@@ -18,8 +18,11 @@ internal data class JournalReadResult(
 
 /** Append-only, fsync-backed local mutation journal. */
 internal class DurableLibraryJournal(private val file: File) {
-    val hasData: Boolean get() = file.isFile && file.length() > 0L
-    val sizeBytes: Long get() = if (file.isFile) file.length() else 0L
+    private val atomicFile get() = AtomicFile(file)
+    private val backupFile get() = File(file.parentFile, "${file.name}.bak")
+
+    val hasData: Boolean get() =
+        (file.isFile && file.length() > 0L) || (backupFile.isFile && backupFile.length() > 0L)
 
     @Synchronized
     fun append(sequence: Long, payload: String): DurableJournalEntry {
@@ -29,6 +32,7 @@ internal class DurableLibraryJournal(private val file: File) {
         val last = existing.lastOrNull()?.sequence ?: 0L
         require(sequence > last) { "Journal sequence must increase: $sequence <= $last" }
 
+        // openRead() above restores an AtomicFile backup before append if compact was interrupted.
         file.parentFile?.mkdirs()
         val payloadBytes = canonicalPayload.toByteArray(Charsets.UTF_8)
         val line = encodeLine(sequence, canonicalPayload, payloadBytes)
@@ -42,11 +46,16 @@ internal class DurableLibraryJournal(private val file: File) {
 
     @Synchronized
     fun read(afterSequence: Long = 0L): JournalReadResult {
-        if (!file.isFile) return JournalReadResult(emptyList(), false)
+        if (!file.isFile && !backupFile.isFile) return JournalReadResult(emptyList(), false)
+        val lines = runCatching {
+            atomicFile.openRead().bufferedReader(Charsets.UTF_8).use { it.readLines() }
+        }.getOrElse {
+            if (!file.isFile) return JournalReadResult(emptyList(), false)
+            throw it
+        }
         val entries = mutableListOf<DurableJournalEntry>()
         var trailing = false
         var previous = 0L
-        val lines = file.readLines(Charsets.UTF_8)
         lines.forEachIndexed { index, line ->
             if (line.isBlank()) return@forEachIndexed
             val parsed = runCatching { parseLine(line) }.getOrElse { error ->
@@ -80,18 +89,17 @@ internal class DurableLibraryJournal(private val file: File) {
      */
     @Synchronized
     fun compactThrough(sequence: Long) {
-        if (!file.exists() || sequence <= 0L) return
+        if ((!file.exists() && !backupFile.exists()) || sequence <= 0L) return
         val retained = read().entries.filter { it.sequence > sequence }
-        val atomic = AtomicFile(file)
-        val output = atomic.startWrite()
+        val output = atomicFile.startWrite()
         try {
             retained.forEach { entry ->
                 val bytes = entry.payload.toByteArray(Charsets.UTF_8)
                 output.write(encodeLine(entry.sequence, entry.payload, bytes).toByteArray(Charsets.UTF_8))
             }
-            atomic.finishWrite(output)
+            atomicFile.finishWrite(output)
         } catch (error: Throwable) {
-            atomic.failWrite(output)
+            atomicFile.failWrite(output)
             throw error
         }
     }
