@@ -1,6 +1,7 @@
 package dev.swart.inklab
 
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asAndroidBitmap
 import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
@@ -161,6 +162,44 @@ class EditorUiTest {
 
             assertEquals(listOf(changed), vm.strokes.toList())
             assertTrue(vm.convertedObjects.isEmpty())
+        }
+    }
+
+    @Test
+    fun firstQuickColorSurvivesViewModelRecreation() {
+        val expected = 0xFF7A31C2.toInt()
+        compose.runOnUiThread {
+            val vm = ViewModelProvider(compose.activity)[EditorViewModel::class.java]
+            val original = vm.inputPreferences
+            try {
+                vm.updateQuickPenColor(0, Color(expected))
+                assertEquals(expected, vm.inputPreferences.quickPenColors[0])
+                assertEquals(Color(expected), vm.penColor)
+
+                val recreated = EditorViewModel(compose.activity.application)
+                assertEquals(expected, recreated.inputPreferences.quickPenColors[0])
+                assertEquals(expected, recreated.inputPreferences.penColor)
+                assertEquals(Color(expected), recreated.penColor)
+            } finally {
+                vm.updateInputPreferences(original)
+                vm.chooseQuickPenColor(0)
+            }
+        }
+    }
+
+    @Test
+    fun allQuickColorsExposeAccessibleEditActions() {
+        compose.runOnUiThread {
+            ViewModelProvider(compose.activity)[EditorViewModel::class.java].createDocument(
+                title = "Quick colors",
+                format = DocumentFormat.NOTEBOOK,
+                orientation = PageOrientation.PORTRAIT
+            )
+        }
+
+        compose.onNodeWithContentDescription("Перо").assertIsDisplayed().performClick()
+        (1..4).forEach { slot ->
+            compose.onNodeWithContentDescription("Изменить быстрый цвет $slot").assertExists()
         }
     }
 }
