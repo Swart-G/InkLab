@@ -37,6 +37,7 @@ import dev.swart.inklab.core.model.ConvertedInkKind
 import dev.swart.inklab.core.model.DocumentFormat
 import dev.swart.inklab.core.model.InkPoint
 import dev.swart.inklab.core.model.InkStroke
+import dev.swart.inklab.core.model.PageStripLayout
 import dev.swart.inklab.core.model.PaperPattern
 import dev.swart.inklab.ui.EditorTool
 import dev.swart.inklab.ui.EditorViewModel
@@ -122,23 +123,25 @@ fun EditorCanvas(vm: EditorViewModel, modifier: Modifier = Modifier) {
         val scale = vm.viewportScale
         val offset = vm.viewportOffset
         val pages = vm.currentBoard?.pages ?: emptyList()
+        val stripLayout = if (notebook) PageStripLayout.from(pages) else null
         pages.forEachIndexed { index, page ->
             val active = index == vm.currentPageIndex
-            val pageX = if (notebook) vm.pageLeft(index) else 0f
-            val pageY = if (notebook) vm.pageTop(index) else 0f
-            if (notebook && ((pageY + page.height) * scale + offset.y < 0 || pageY * scale + offset.y > size.height)) {
+            val placement = stripLayout?.placement(index)
+            val pageX = placement?.stripLeft ?: 0f
+            val pageY = placement?.stripTop ?: 0f
+            if (notebook && placement != null && ((placement.stripTop + placement.height) * scale + offset.y < 0 || placement.stripTop * scale + offset.y > size.height)) {
                 return@forEachIndexed
             }
             if (!notebook && !active) return@forEachIndexed
-            val worldLeft = if (notebook) page.originX else -offset.x / scale
-            val worldTop = if (notebook) page.originY else -offset.y / scale
-            val worldRight = if (notebook) worldLeft + page.width else worldLeft + size.width / scale
-            val worldBottom = if (notebook) worldTop + page.height else worldTop + size.height / scale
+            val worldLeft = if (notebook) placement?.originX ?: page.originX else -offset.x / scale
+            val worldTop = if (notebook) placement?.originY ?: page.originY else -offset.y / scale
+            val worldRight = if (notebook) worldLeft + (placement?.width ?: page.width) else worldLeft + size.width / scale
+            val worldBottom = if (notebook) worldTop + (placement?.height ?: page.height) else worldTop + size.height / scale
             val spacing = (boardSettings?.spacing ?: 36f).coerceAtLeast(12f)
             withTransform({
                 translate(offset.x, offset.y)
                 scale(scale, scale, pivot = Offset.Zero)
-                if (notebook) translate(pageX - page.originX, pageY - page.originY)
+                if (notebook) translate(pageX - worldLeft, pageY - worldTop)
             }) {
                 if (notebook) {
                     drawRect(
