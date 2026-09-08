@@ -33,11 +33,16 @@ internal class DurableLibraryJournal(private val file: File) {
     fun append(sequence: Long, payload: String): DurableJournalEntry {
         require(sequence > 0L)
         val canonicalPayload = JSONObject(payload).toString()
-        val existing = read().entries
+        val readResult = read()
+        val existing = readResult.entries
         val last = existing.lastOrNull()?.sequence ?: 0L
         require(sequence > last) { "Journal sequence must increase: $sequence <= $last" }
 
-        // openRead() above restores an AtomicFile backup before append if compact was interrupted.
+        // A failed/ENOSPC append may leave one unconfirmed trailing record. It is safe to ignore on
+        // replay, but it must be removed before the next append; otherwise it would become a corrupt
+        // record in the middle of the journal as soon as a newer valid record is appended.
+        if (readResult.ignoredTrailingRecord) rewrite(existing)
+
         file.parentFile?.mkdirs()
         val payloadBytes = canonicalPayload.toByteArray(Charsets.UTF_8)
         val line = encodeLine(sequence, canonicalPayload, payloadBytes)
@@ -96,12 +101,19 @@ internal class DurableLibraryJournal(private val file: File) {
     fun compactThrough(sequence: Long) {
         if ((!file.exists() && !backupFile.exists()) || sequence <= 0L) return
         val retained = read().entries.filter { it.sequence > sequence }
+        rewrite(retained)
+    }
+
+    private fun rewrite(entries: List<DurableJournalEntry>) {
+        file.parentFile?.mkdirs()
         val output = atomicFile.startWrite()
         try {
-            retained.forEach { entry ->
+            entries.forEach { entry ->
                 val bytes = entry.payload.toByteArray(Charsets.UTF_8)
                 output.write(encodeLine(entry.sequence, entry.payload, bytes).toByteArray(Charsets.UTF_8))
             }
+            output.flush()
+            output.fd.sync()
             atomicFile.finishWrite(output)
         } catch (error: Throwable) {
             atomicFile.failWrite(output)
