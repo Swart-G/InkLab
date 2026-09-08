@@ -83,8 +83,6 @@ internal class TransactionalLibraryStore(private val root: File) {
         require(documents.keys.all(::safeId)) { "Недопустимый documentId" }
         JSONArray(foldersJson)
 
-        // Recovery can deliberately replace an unreadable store with an empty root while keeping
-        // this repository instance alive. Never let a stale in-memory manifest survive that reset.
         if (!hasPublishedData()) activeManifest = null
         else if (activeManifest == null) load()
 
@@ -125,7 +123,10 @@ internal class TransactionalLibraryStore(private val root: File) {
         val verified = readManifest(generationId, verifyPayloads = true)
         writeAtomic(currentFile, generationId.toString())
         activeManifest = verified
-        pruneGenerationManifests(generationId)
+        pruneGenerationManifests(
+            currentGeneration = generationId,
+            previousValidGeneration = previous?.generationId
+        )
         return LibraryStoreCommit(
             sequence = requestedSequence,
             previousSequence = previous?.journalSequence ?: 0L,
@@ -202,16 +203,14 @@ internal class TransactionalLibraryStore(private val root: File) {
         return match.groupValues[1].toLongOrNull()
     }
 
-    private fun pruneGenerationManifests(current: Long) {
-        val keep = generationsDirectory.listFiles()
-            ?.mapNotNull { file -> generationNumber(file)?.let { it to file } }
-            ?.sortedByDescending { it.first }
-            ?.take(2)
-            ?.mapTo(mutableSetOf()) { it.first }
-            .orEmpty()
+    private fun pruneGenerationManifests(currentGeneration: Long, previousValidGeneration: Long?) {
+        val keep = buildSet {
+            add(currentGeneration)
+            previousValidGeneration?.let(::add)
+        }
         generationsDirectory.listFiles()?.forEach { file ->
             val number = generationNumber(file) ?: return@forEach
-            if (number !in keep && number < current) {
+            if (number !in keep) {
                 file.delete()
                 File(file.parentFile, "${file.name}.bak").delete()
             }
