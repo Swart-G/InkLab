@@ -242,6 +242,11 @@ class BoardRepository(context: Context) {
         return boards to folders
     }
 
+    /**
+     * Journal v2 avoids serialising the complete document on the common pen-up path. New documents
+     * and structural page-list changes still use a full upsert; edits inside an existing page store
+     * only document metadata and the page payloads that actually changed.
+     */
     private fun buildMutation(
         beforeBoards: List<InkBoard>,
         afterBoards: List<InkBoard>,
@@ -251,19 +256,42 @@ class BoardRepository(context: Context) {
         if (beforeBoards == afterBoards && beforeFolders == afterFolders) return null
         val old = beforeBoards.associateBy { it.id }
         val fresh = afterBoards.associateBy { it.id }
-        val changed = afterBoards.filter { old[it.id] != it }
         val deleted = beforeBoards.map { it.id }.filter { it !in fresh }
         val orderChanged = beforeBoards.map { it.id } != afterBoards.map { it.id }
         val foldersChanged = beforeFolders != afterFolders
 
+        val upsert = JSONArray()
+        val patches = JSONArray()
+        afterBoards.forEach { board ->
+            val previous = old[board.id]
+            if (previous == board) return@forEach
+            if (previous == null || !samePageStructure(previous, board)) {
+                upsert.put(board.toJson())
+                return@forEach
+            }
+
+            val beforePages = (previous.pages + previous.trashedPages).associateBy { it.id }
+            val changedPages = (board.pages + board.trashedPages).filter { beforePages[it.id] != it }
+            patches.put(JSONObject().apply {
+                put("id", board.id)
+                put("meta", board.metadataJson())
+                put("pages", JSONArray().apply { changedPages.forEach { put(it.toJson()) } })
+            })
+        }
+
         return JSONObject().apply {
             put("version", JOURNAL_MUTATION_VERSION)
-            put("upsert", JSONArray().apply { changed.forEach { put(it.toJson()) } })
+            put("upsert", upsert)
+            put("patch", patches)
             put("delete", JSONArray(deleted))
             if (orderChanged) put("order", JSONArray(afterBoards.map { it.id }))
             if (foldersChanged) put("folders", foldersToJson(afterFolders))
         }
     }
+
+    private fun samePageStructure(before: InkBoard, after: InkBoard): Boolean =
+        before.pages.map { it.id } == after.pages.map { it.id } &&
+            before.trashedPages.map { it.id } == after.trashedPages.map { it.id }
 
     private fun applyMutation(
         baseDocuments: LinkedHashMap<String, String>,
@@ -271,7 +299,8 @@ class BoardRepository(context: Context) {
         payload: String
     ): Pair<LinkedHashMap<String, String>, String> {
         val root = JSONObject(payload)
-        require(root.getInt("version") == JOURNAL_MUTATION_VERSION) { "Неподдерживаемая версия journal mutation" }
+        val version = root.getInt("version")
+        require(version in 1..JOURNAL_MUTATION_VERSION) { "Неподдерживаемая версия journal mutation" }
         val documents = LinkedHashMap(baseDocuments)
 
         val deleted = root.optJSONArray("delete") ?: JSONArray()
@@ -289,6 +318,34 @@ class BoardRepository(context: Context) {
             documents[board.id] = board.toJson().toString()
         }
 
+        if (version >= 2) {
+            val patches = root.optJSONArray("patch") ?: JSONArray()
+            repeat(patches.length()) { index ->
+                val patch = patches.getJSONObject(index)
+                val id = patch.getString("id")
+                require(safeId(id))
+                val currentJson = JSONObject(documents[id] ?: error("Patch ссылается на отсутствующий документ $id"))
+                require(currentJson.optString("id") == id)
+
+                val meta = patch.getJSONObject("meta")
+                val metaKeys = meta.keys()
+                while (metaKeys.hasNext()) {
+                    val key = metaKeys.next()
+                    require(key != "pages" && key != "trashedPages")
+                    currentJson.put(key, meta.get(key))
+                }
+
+                val pagePatches = patch.optJSONArray("pages") ?: JSONArray()
+                repeat(pagePatches.length()) { pageIndex ->
+                    replacePagePayload(currentJson, pagePatches.getJSONObject(pageIndex))
+                }
+
+                val board = currentJson.toBoard()
+                validateBoards(listOf(board))
+                documents[id] = board.toJson().toString()
+            }
+        }
+
         val order = root.optJSONArray("order")
         val ordered = if (order != null) {
             val ids = List(order.length()) { order.getString(it) }
@@ -300,6 +357,22 @@ class BoardRepository(context: Context) {
         val foldersJson = root.optJSONArray("folders")?.toString() ?: baseFoldersJson
         parseFolders(JSONArray(foldersJson))
         return ordered to foldersJson
+    }
+
+    private fun replacePagePayload(document: JSONObject, pagePayload: JSONObject) {
+        val pageId = pagePayload.getString("id")
+        require(safeId(pageId))
+        var matches = 0
+        listOf("pages", "trashedPages").forEach { key ->
+            val pages = document.optJSONArray(key) ?: return@forEach
+            repeat(pages.length()) { index ->
+                if (pages.getJSONObject(index).optString("id") == pageId) {
+                    pages.put(index, pagePayload)
+                    matches += 1
+                }
+            }
+        }
+        require(matches == 1) { "Page patch $pageId не соответствует ровно одной странице" }
     }
 
     private fun documentsJson(boards: List<InkBoard>) = LinkedHashMap<String, String>(boards.size).apply {
@@ -423,14 +496,12 @@ class BoardRepository(context: Context) {
         }
     }
 
-    private fun InkBoard.toJson() = JSONObject().apply {
+    /** Durable document metadata. Viewport scale/offset are intentionally excluded. */
+    private fun InkBoard.metadataJson() = JSONObject().apply {
         put("schemaVersion", BOARD_SCHEMA_VERSION)
         put("languageTag", languageTag)
         put("favorite", favorite)
         put("deletedAt", deletedAt ?: JSONObject.NULL)
-        put("savedScale", savedScale.toDouble())
-        put("savedOffsetX", savedOffsetX.toDouble())
-        put("savedOffsetY", savedOffsetY.toDouble())
         put("id", id)
         put("title", title)
         put("subject", subject)
@@ -446,20 +517,25 @@ class BoardRepository(context: Context) {
             put("paperColor", settings.paperColor)
             put("showMargin", settings.showMargin)
         })
+    }
+
+    private fun InkBoard.toJson() = metadataJson().apply {
         put("pages", pagesJson(pages))
         put("trashedPages", pagesJson(trashedPages))
     }
 
+    private fun InkPage.toJson() = JSONObject().apply {
+        put("id", id)
+        put("width", width.toDouble())
+        put("height", height.toDouble())
+        put("originX", originX.toDouble())
+        put("originY", originY.toDouble())
+        put("strokes", JSONArray().apply { this@toJson.strokes.forEach { put(it.toJson()) } })
+        put("convertedObjects", convertedObjects.toJson())
+    }
+
     private fun pagesJson(pages: List<InkPage>) = JSONArray().apply {
-        pages.forEach { page -> put(JSONObject().apply {
-            put("id", page.id)
-            put("width", page.width.toDouble())
-            put("height", page.height.toDouble())
-            put("originX", page.originX.toDouble())
-            put("originY", page.originY.toDouble())
-            put("strokes", JSONArray().apply { page.strokes.forEach { put(it.toJson()) } })
-            put("convertedObjects", page.convertedObjects.toJson())
-        }) }
+        pages.forEach { put(it.toJson()) }
     }
 
     private fun List<ConvertedInkObject>.toJson() = JSONArray().apply {
@@ -605,6 +681,8 @@ class BoardRepository(context: Context) {
             favorite = optBoolean("favorite", false),
             deletedAt = if (isNull("deletedAt")) null else optLong("deletedAt"),
             trashedPages = trashed,
+            // Legacy v2 documents may contain viewport fields. Read them for the current session,
+            // but metadataJson()/toJson() deliberately never persist them again.
             savedScale = optDouble("savedScale", 0.0).toFloat(),
             savedOffsetX = optDouble("savedOffsetX", 0.0).toFloat(),
             savedOffsetY = optDouble("savedOffsetY", 0.0).toFloat(),
@@ -616,7 +694,7 @@ class BoardRepository(context: Context) {
 
     companion object {
         private const val BOARD_SCHEMA_VERSION = 2
-        private const val JOURNAL_MUTATION_VERSION = 1
+        private const val JOURNAL_MUTATION_VERSION = 2
         private const val CHECKPOINT_ENTRY_LIMIT = 32
         private const val CHECKPOINT_BYTES_LIMIT = 4L * 1024L * 1024L
     }
