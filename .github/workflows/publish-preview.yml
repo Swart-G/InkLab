@@ -73,9 +73,9 @@ jobs:
             --notes-file .github/release-notes.md \
             --prerelease
 
-  storage-instrumentation:
+  android-instrumentation:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    timeout-minutes: 30
 
     steps:
       - name: Check out sources
@@ -96,7 +96,7 @@ jobs:
             sudo chmod 666 /dev/kvm
           fi
 
-      - name: Run P1 storage tests on Android
+      - name: Run P1 storage and P2 editor UI tests on Android
         uses: reactivecircus/android-emulator-runner@v2.38.0
         with:
           api-level: 35
@@ -104,4 +104,4 @@ jobs:
           arch: x86_64
           disable-animations: true
           emulator-options: -no-window -no-snapshot-save -noaudio -no-boot-anim -gpu swiftshader_indirect
-          script: ./gradlew connectedDebugAndroidTest -PtestAbi=x86_64 '-Pandroid.testInstrumentationRunnerArguments.class=dev.swart.inklab.TransactionalStorageTest,dev.swart.inklab.P1StorageContractTest' --no-daemon
+          script: ./gradlew connectedDebugAndroidTest -PtestAbi=x86_64 '-Pandroid.testInstrumentationRunnerArguments.class=dev.swart.inklab.TransactionalStorageTest,dev.swart.inklab.P1StorageContractTest,dev.swart.inklab.EditorUiTest' --no-daemon

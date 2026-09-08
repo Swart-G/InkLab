@@ -35,6 +35,8 @@ import dev.swart.inklab.core.model.InkStroke
 import dev.swart.inklab.core.model.PageOrientation
 import dev.swart.inklab.core.recognition.RecognitionMode
 import dev.swart.inklab.core.recognition.RecognitionResult
+import dev.swart.inklab.core.recognition.RecognitionSourceState
+import dev.swart.inklab.core.recognition.recognitionSourceState
 import dev.swart.inklab.core.storage.BoardRepository
 import dev.swart.inklab.core.storage.EraserMode
 import dev.swart.inklab.core.storage.InputPreferences
@@ -59,7 +61,8 @@ data class UiRecognition(
     val sourceIds: Set<String> = emptySet(),
     val documentId: String = "",
     val pageId: String = "",
-    val originalStrokes: List<InkStroke> = emptyList()
+    val originalStrokes: List<InkStroke> = emptyList(),
+    val sourceState: RecognitionSourceState = RecognitionSourceState.UNCHANGED
 )
 
 private data class DocumentSnapshot(
@@ -156,6 +159,13 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     val selectionBounds: Rect?
         get() = selectedConvertedObject?.bounds() ?: currentSelectionBounds
 
+    val canApplyRecognitionCopy: Boolean
+        get() = recognition?.let { state ->
+            state.result != null &&
+                state.documentId == currentBoardId &&
+                state.pageId == currentBoard?.pages?.getOrNull(currentPageIndex)?.id
+        } == true
+
     init {
         folders += boardRepository.loadFolders()
         val loaded = boardRepository.load()
@@ -178,7 +188,6 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
                 } else if (request.sequence == requestedSaveSequence) {
                     storageError = result.exceptionOrNull()?.let { "Не удалось сохранить: ${it.message}" }
                 }
-                // A stale acknowledgement must not hide a newer pending edit.
                 saving = request.sequence != requestedSaveSequence
             }
         }
@@ -882,18 +891,45 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         }
         val sourceIds = input.mapTo(mutableSetOf()) { it.id }
         viewModelScope.launch {
-            recognition = UiRecognition(mode, loading = true, sourceIds = sourceIds)
+            recognition = UiRecognition(
+                mode = mode,
+                loading = true,
+                sourceIds = sourceIds,
+                documentId = requestBoard,
+                pageId = requestPage,
+                originalStrokes = input
+            )
             runCatching {
                 provider.recognize(context, input, mode)
-            }.onSuccess {
-                if (currentBoardId != requestBoard || currentBoard?.pages?.getOrNull(currentPageIndex)?.id != requestPage || strokes.filter { it.id in sourceIds } != input) {
-                    recognition = UiRecognition(mode, error = "Страница или рукопись изменилась. Повторите распознавание на исходной странице.")
-                    return@onSuccess
-                }
-                recognition = UiRecognition(mode, result = it, sourceIds = sourceIds, documentId = requestBoard, pageId = requestPage, originalStrokes = input)
-                if (mode == RecognitionMode.MATH) applyRecognition()
+            }.onSuccess { result ->
+                val sourceState = recognitionSourceState(
+                    requestDocumentId = requestBoard,
+                    requestPageId = requestPage,
+                    currentDocumentId = currentBoardId,
+                    currentPageId = currentBoard?.pages?.getOrNull(currentPageIndex)?.id,
+                    sourceIds = sourceIds,
+                    originalStrokes = input,
+                    currentStrokes = strokes
+                )
+                recognition = UiRecognition(
+                    mode = mode,
+                    result = result,
+                    sourceIds = sourceIds,
+                    documentId = requestBoard,
+                    pageId = requestPage,
+                    originalStrokes = input,
+                    sourceState = sourceState
+                )
+                if (mode == RecognitionMode.MATH && sourceState == RecognitionSourceState.UNCHANGED) applyRecognition()
             }.onFailure {
-                recognition = UiRecognition(mode, error = it.message ?: "Ошибка распознавания", sourceIds = sourceIds)
+                recognition = UiRecognition(
+                    mode = mode,
+                    error = it.message ?: "Ошибка распознавания",
+                    sourceIds = sourceIds,
+                    documentId = requestBoard,
+                    pageId = requestPage,
+                    originalStrokes = input
+                )
             }
         }
     }
@@ -902,45 +938,72 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         val paint = android.text.TextPaint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply { textSize = size; typeface = android.graphics.Typeface.create("cursive",android.graphics.Typeface.NORMAL) }
         return android.text.StaticLayout.Builder.obtain(content,0,content.length,paint,width.toInt().coerceAtLeast(1)).setIncludePad(false).setLineSpacing(0f,1.16f).build().height.toFloat().coerceAtLeast(size)
     }
+
     fun chooseRecognitionCandidate(value: String) {
         recognition = recognition?.let { it.copy(result = it.result?.copy(primary = value)) }
-        applyRecognition()
     }
+
     fun applyRecognition() {
         val state = recognition ?: return
-        val result = state.result ?: return
-        if (state.documentId != currentBoardId || state.pageId != currentBoard?.pages?.getOrNull(currentPageIndex)?.id || strokes.filter {it.id in state.sourceIds} != state.originalStrokes) {
-            recognition = UiRecognition(state.mode, error = "Исходная рукопись изменилась. Повторите распознавание.")
+        val liveState = recognitionSourceState(
+            requestDocumentId = state.documentId,
+            requestPageId = state.pageId,
+            currentDocumentId = currentBoardId,
+            currentPageId = currentBoard?.pages?.getOrNull(currentPageIndex)?.id,
+            sourceIds = state.sourceIds,
+            originalStrokes = state.originalStrokes,
+            currentStrokes = strokes
+        )
+        if (liveState != RecognitionSourceState.UNCHANGED) {
+            recognition = state.copy(sourceState = liveState)
             return
         }
         val source = strokes.filter { it.id in state.sourceIds }
-        if (source.isEmpty() || result.primary.isBlank()) return
-        val bounds = sourceBounds(source) ?: return
+        val converted = recognitionObject(state, source, Offset.Zero) ?: return
         pushUndo()
         strokes.removeAll { it.id in state.sourceIds }
-
-        val isText = state.mode == RecognitionMode.TEXT
-        val textSize = if (isText) (bounds.height * 0.76f).coerceIn(18f, 68f) else (bounds.height * 0.72f).coerceIn(20f, 76f)
-        val width = if (isText) bounds.width.coerceAtLeast(textSize * 3f) else bounds.width.coerceAtLeast(textSize * 1.5f)
-        val height = if (isText) textHeight(result.primary, textSize, width) else bounds.height.coerceAtLeast(textSize * 1.1f)
-        val objectColor = source.firstOrNull()?.color ?: penColor
-        val converted = ConvertedInkObject(
-            kind = if (isText) ConvertedInkKind.TEXT else ConvertedInkKind.MATH,
-            content = result.primary,
-            x = bounds.left,
-            y = bounds.top,
-            width = width,
-            height = height,
-            textSize = textSize,
-            color = objectColor,
-            sourceStrokes = source,
-            providerId = result.providerId
-        )
         convertedObjects += converted
         selectedIds = emptySet()
         selectedConvertedId = converted.id
         recognition = null
         persistCurrentBoard()
+    }
+
+    fun applyRecognitionAsCopy() {
+        val state = recognition ?: return
+        if (!canApplyRecognitionCopy) {
+            recognition = state.copy(sourceState = RecognitionSourceState.LOCATION_CHANGED)
+            return
+        }
+        val converted = recognitionObject(state, state.originalStrokes, Offset(22f, 22f)) ?: return
+        pushUndo()
+        convertedObjects += converted
+        selectedIds = emptySet()
+        selectedConvertedId = converted.id
+        recognition = null
+        persistCurrentBoard()
+    }
+
+    private fun recognitionObject(state: UiRecognition, source: List<InkStroke>, offset: Offset): ConvertedInkObject? {
+        val result = state.result ?: return null
+        if (source.isEmpty() || result.primary.isBlank()) return null
+        val bounds = sourceBounds(source) ?: return null
+        val isText = state.mode == RecognitionMode.TEXT
+        val textSize = if (isText) (bounds.height * 0.76f).coerceIn(18f, 68f) else (bounds.height * 0.72f).coerceIn(20f, 76f)
+        val width = if (isText) bounds.width.coerceAtLeast(textSize * 3f) else bounds.width.coerceAtLeast(textSize * 1.5f)
+        val height = if (isText) textHeight(result.primary, textSize, width) else bounds.height.coerceAtLeast(textSize * 1.1f)
+        return ConvertedInkObject(
+            kind = if (isText) ConvertedInkKind.TEXT else ConvertedInkKind.MATH,
+            content = result.primary,
+            x = bounds.left + offset.x,
+            y = bounds.top + offset.y,
+            width = width,
+            height = height,
+            textSize = textSize,
+            color = source.firstOrNull()?.color ?: penColor,
+            sourceStrokes = source,
+            providerId = result.providerId
+        )
     }
 
     fun prepareProvider(context: Context, id: String, wifiOnly: Boolean? = null) {
