@@ -56,6 +56,24 @@ class TransactionalStorageTest {
     }
 
     @Test
+    fun repeatedMigrationLoadDoesNotDuplicateOrRepublishDocument() {
+        val legacy = InkBoard(id = "legacy-document", title = "Legacy", format = DocumentFormat.NOTEBOOK)
+        File(app.filesDir, "boards.json").writeText(BoardRepository(app).encode(listOf(legacy)))
+        assertEquals(listOf(legacy), BoardRepository(app).load())
+        val root = File(app.filesDir, "library-store-v1")
+        val publishedGeneration = File(root, "CURRENT").readText().trim()
+        val generationFiles = File(root, "generations").listFiles()?.map { it.name }?.sorted().orEmpty()
+
+        repeat(3) {
+            val reopened = BoardRepository(app)
+            assertEquals(listOf(legacy), reopened.load())
+            assertEquals(1, reopened.load().size)
+        }
+        assertEquals(publishedGeneration, File(root, "CURRENT").readText().trim())
+        assertEquals(generationFiles, File(root, "generations").listFiles()?.map { it.name }?.sorted().orEmpty())
+    }
+
+    @Test
     fun journalMutationSurvivesRepositoryRestartBeforeCheckpoint() {
         val repo = BoardRepository(app)
         val original = InkBoard(id = "document", title = "Original", format = DocumentFormat.NOTEBOOK)
@@ -123,6 +141,39 @@ class TransactionalStorageTest {
     }
 
     @Test
+    fun brokenCurrentPointerIsRepairedToNewestValidGeneration() {
+        val original = InkBoard(id = "document", title = "Original", format = DocumentFormat.NOTEBOOK)
+        val repo = BoardRepository(app)
+        repo.saveLibrary(listOf(original), emptyList())
+        repo.saveLibrary(listOf(original.copy(title = "Newest")), emptyList())
+        repo.checkpoint()
+        val root = File(app.filesDir, "library-store-v1")
+        val newestGeneration = File(root, "CURRENT").readText().trim().toLong()
+        File(root, "CURRENT").writeText("broken-pointer")
+
+        val restored = BoardRepository(app)
+        assertEquals("Newest", restored.load().single().title)
+        assertEquals(newestGeneration.toString(), File(root, "CURRENT").readText().trim())
+    }
+
+    @Test
+    fun corruptedNewestManifestFallsBackAndReplaysConfirmedJournal() {
+        val original = InkBoard(id = "document", title = "Original", format = DocumentFormat.NOTEBOOK)
+        val repo = BoardRepository(app)
+        repo.saveLibrary(listOf(original), emptyList())
+        val changed = repo.saveLibrary(listOf(original.copy(title = "Newest")), emptyList())
+        repo.checkpoint()
+        val root = File(app.filesDir, "library-store-v1")
+        val newestGeneration = File(root, "CURRENT").readText().trim().toLong()
+        File(root, "generations/g-$newestGeneration.json").writeText("{broken")
+
+        val restored = BoardRepository(app)
+        assertEquals("Newest", restored.load().single().title)
+        assertEquals(changed.sequence, restored.lastCommittedSequence)
+        assertTrue(File(root, "CURRENT").readText().trim().toLong() < newestGeneration)
+    }
+
+    @Test
     fun corruptedNewestCheckpointRebuildsFromPreviousCheckpointAndJournal() {
         val repo = BoardRepository(app)
         val original = InkBoard(id = "document", title = "Original", format = DocumentFormat.NOTEBOOK)
@@ -138,6 +189,28 @@ class TransactionalStorageTest {
         assertEquals("Newest", restored.load().single().title)
         assertEquals(changed.sequence, restored.lastCommittedSequence)
         assertTrue(File(root, "CURRENT").readText().trim().toLong() < currentGeneration)
+    }
+
+    @Test
+    fun oneDamagedDocumentPayloadDoesNotHideOtherConfirmedDocuments() {
+        val first = InkBoard(id = "first-document", title = "First", format = DocumentFormat.NOTEBOOK)
+        val second = InkBoard(id = "second-document", title = "Second", format = DocumentFormat.NOTEBOOK)
+        val repo = BoardRepository(app)
+        repo.saveLibrary(listOf(first, second), emptyList())
+        val newestFirst = first.copy(title = "First newest")
+        repo.saveLibrary(listOf(newestFirst, second), emptyList())
+        val newestSecond = second.copy(title = "Second newest")
+        val confirmed = repo.saveLibrary(listOf(newestFirst, newestSecond), emptyList())
+        repo.checkpoint()
+
+        val root = File(app.filesDir, "library-store-v1")
+        val generation = File(root, "CURRENT").readText().trim().toLong()
+        val manifest = JSONObject(File(root, "generations/g-$generation.json").readText())
+        corruptPayload(root, manifest, "first-document")
+
+        val restored = BoardRepository(app)
+        assertEquals(listOf("First newest", "Second newest"), restored.load().map { it.title })
+        assertEquals(confirmed.sequence, restored.lastCommittedSequence)
     }
 
     @Test
@@ -219,6 +292,14 @@ class TransactionalStorageTest {
 
     private fun corruptFirstPayload(root: File, manifest: JSONObject) {
         val ref = manifest.getJSONArray("documents").getJSONObject(0)
+        File(root, "documents/${ref.getString("id")}.${ref.getString("slot")}.json").writeText("broken")
+    }
+
+    private fun corruptPayload(root: File, manifest: JSONObject, id: String) {
+        val refs = manifest.getJSONArray("documents")
+        val ref = (0 until refs.length())
+            .map { refs.getJSONObject(it) }
+            .first { it.getString("id") == id }
         File(root, "documents/${ref.getString("id")}.${ref.getString("slot")}.json").writeText("broken")
     }
 }
