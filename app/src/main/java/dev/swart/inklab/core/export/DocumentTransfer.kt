@@ -19,23 +19,24 @@ import ru.noties.jlatexmath.JLatexMathDrawable
 
 object PageRenderer {
     fun draw(canvas: Canvas, page: InkPage, settings: BoardSettings) {
+        val resolvedSettings = page.resolvedPaperSettings(settings)
         val paint=Paint(Paint.ANTI_ALIAS_FLAG)
-        canvas.drawColor(settings.paperColor.toInt())
+        canvas.drawColor(resolvedSettings.paperColor.toInt())
         canvas.save(); canvas.translate(-page.originX,-page.originY)
         val left=page.originX; val top=page.originY; val right=left+page.width; val bottom=top+page.height
-        paint.color=if(android.graphics.Color.luminance(settings.paperColor.toInt()) < 0.4f) 0xFF565860.toInt() else 0xFFC9C5BC.toInt()
+        paint.color=if(android.graphics.Color.luminance(resolvedSettings.paperColor.toInt()) < 0.4f) 0xFF565860.toInt() else 0xFFC9C5BC.toInt()
         paint.strokeWidth=0.8f
-        val spacing=settings.spacing.coerceAtLeast(12f)
-        if(settings.pattern!=PaperPattern.BLANK) {
+        val spacing=resolvedSettings.spacing.coerceAtLeast(12f)
+        if(resolvedSettings.pattern!=PaperPattern.BLANK) {
             var y=kotlin.math.floor(top/spacing)*spacing
             while(y<bottom) {
-                if(settings.pattern==PaperPattern.RULED || settings.pattern==PaperPattern.GRID) canvas.drawLine(left,y,right,y,paint)
-                if(settings.pattern==PaperPattern.DOTS) { var x=kotlin.math.floor(left/spacing)*spacing; while(x<right) { canvas.drawCircle(x,y,1.2f,paint); x+=spacing } }
+                if(resolvedSettings.pattern==PaperPattern.RULED || resolvedSettings.pattern==PaperPattern.GRID) canvas.drawLine(left,y,right,y,paint)
+                if(resolvedSettings.pattern==PaperPattern.DOTS) { var x=kotlin.math.floor(left/spacing)*spacing; while(x<right) { canvas.drawCircle(x,y,1.2f,paint); x+=spacing } }
                 y+=spacing
             }
-            if(settings.pattern==PaperPattern.GRID) { var x=kotlin.math.floor(left/spacing)*spacing; while(x<right) { canvas.drawLine(x,top,x,bottom,paint); x+=spacing } }
+            if(resolvedSettings.pattern==PaperPattern.GRID) { var x=kotlin.math.floor(left/spacing)*spacing; while(x<right) { canvas.drawLine(x,top,x,bottom,paint); x+=spacing } }
         }
-        if(settings.showMargin) { paint.color=0xFFDE9B9F.toInt(); canvas.drawLine(74f,top,74f,bottom,paint) }
+        if(resolvedSettings.showMargin) { paint.color=0xFFDE9B9F.toInt(); canvas.drawLine(74f,top,74f,bottom,paint) }
         paint.strokeCap=Paint.Cap.ROUND
         page.strokes.forEach { stroke ->
             paint.color=stroke.color.toArgb()
