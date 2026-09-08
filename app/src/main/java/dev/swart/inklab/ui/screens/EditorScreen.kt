@@ -1,6 +1,5 @@
 package dev.swart.inklab.ui.screens
 
-import android.widget.Toast
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
@@ -325,7 +324,6 @@ private fun ToolDock(
     onFocusModeChange: (Boolean) -> Unit,
     modifier: Modifier = Modifier
 ) {
-    val context = LocalContext.current
     var optionsFor by remember { mutableStateOf<EditorTool?>(null) }
     var editingColorSlot by remember { mutableStateOf<Int?>(null) }
     var viewMenu by remember { mutableStateOf(false) }
@@ -361,14 +359,11 @@ private fun ToolDock(
                 ToolbarDivider()
                 vm.inputPreferences.quickPenColors.forEachIndexed { index, color ->
                     QuickColorDot(
-                        color = if (index == 0) InkColors.Ink else Color(color),
-                        label = if (index == 0) "Основной цвет" else "Быстрый цвет ${index + 1}",
-                        selected = vm.tool == EditorTool.PEN && vm.penColor == Color(if (index == 0) 0xFF25272C.toInt() else color),
+                        color = Color(color),
+                        label = "Быстрый цвет ${index + 1}",
+                        selected = vm.tool == EditorTool.PEN && vm.penColor == Color(color),
                         onTap = { vm.chooseQuickPenColor(index) },
-                        onLongPress = {
-                            if (index == 0) Toast.makeText(context, "Основной цвет следует теме и не изменяется", Toast.LENGTH_SHORT).show()
-                            else editingColorSlot = index
-                        }
+                        onLongPress = { editingColorSlot = index }
                     )
                 }
                 IconButton(onClick = { optionsFor = vm.tool }) { Icon(Icons.Outlined.Tune, "Параметры инструмента", Modifier.size(21.dp)) }
@@ -408,7 +403,10 @@ private fun ToolDock(
         }
         DropdownMenu(expanded = optionsFor != null, onDismissRequest = { optionsFor = null }, modifier = Modifier.width(292.dp).background(InkColors.PaperRaised)) {
             when (optionsFor) {
-                EditorTool.PEN -> PenOptions(vm)
+                EditorTool.PEN -> PenOptions(vm) { slot ->
+                    optionsFor = null
+                    editingColorSlot = slot
+                }
                 EditorTool.ERASER -> EraserOptions(vm)
                 EditorTool.LASSO -> LassoOptions(vm) { optionsFor = null }
                 null -> Unit
@@ -459,7 +457,7 @@ private fun QuickColorDialog(initial: Color, dismiss: () -> Unit, save: (Color) 
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                     Surface(Modifier.size(42.dp), CircleShape, current, border = BorderStroke(1.dp, InkColors.Line)) {}
-                    Text("Удерживайте цвет на панели, чтобы изменить его снова.", color = InkColors.Muted, style = MaterialTheme.typography.bodySmall)
+                    Text("Цвет можно изменить удержанием на панели или через параметры пера.", color = InkColors.Muted, style = MaterialTheme.typography.bodySmall)
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     penPalette.forEach { preset ->
@@ -484,13 +482,32 @@ private fun QuickColorDialog(initial: Color, dismiss: () -> Unit, save: (Color) 
 }
 
 @Composable
-private fun PenOptions(vm: EditorViewModel) {
+private fun PenOptions(vm: EditorViewModel, onEditQuickColor: (Int) -> Unit) {
     Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
         Text("Перо", fontWeight = FontWeight.SemiBold)
         Row(horizontalArrangement = Arrangement.spacedBy(9.dp)) {
-            penPalette.forEachIndexed { index, color ->
-                val display = if (index == 0) InkColors.Ink else color
-                ColorDot(display, if (vm.penColor == color) display else Color.Transparent, 28.dp) { vm.choosePenColor(color) }
+            penPalette.forEach { color ->
+                ColorDot(color, if (vm.penColor == color) color else Color.Transparent, 28.dp) { vm.choosePenColor(color) }
+            }
+        }
+        Text("Быстрые цвета", color = InkColors.Muted, style = MaterialTheme.typography.bodySmall)
+        Row(horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+            vm.inputPreferences.quickPenColors.forEachIndexed { index, color ->
+                TextButton(
+                    onClick = { onEditQuickColor(index) },
+                    modifier = Modifier.heightIn(min = 48.dp).semantics {
+                        contentDescription = "Изменить быстрый цвет ${index + 1}"
+                    }
+                ) {
+                    Surface(
+                        Modifier.size(20.dp),
+                        shape = CircleShape,
+                        color = Color(color),
+                        border = BorderStroke(1.dp, InkColors.Line)
+                    ) {}
+                    Spacer(Modifier.width(4.dp))
+                    Text("${index + 1}")
+                }
             }
         }
         Text("Толщина · ${vm.penWidth.toInt()}", color = InkColors.Muted, style = MaterialTheme.typography.bodySmall)
