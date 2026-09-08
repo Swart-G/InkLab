@@ -21,14 +21,16 @@ import java.util.UUID
 
 data class LocalSaveReceipt(
     val sequence: Long,
-    val committedAt: Long
+    val committedAt: Long,
+    val checkpointed: Boolean = false
 )
 
 class BoardRepository(context: Context) {
     private val filesDir = context.filesDir
     private val transactionalStore = TransactionalLibraryStore(File(filesDir, "library-store-v1"))
+    private val journal = DurableLibraryJournal(File(filesDir, "library-store-v1/journal.ndjson"))
     private val directory = File(filesDir, "documents")
-    private val migrationBackup = File(filesDir, "migration-local-store-v1")
+    private val migrationBackup = File(filesDir, "migration-v1")
     private val file = File(filesDir, "boards.json")
     private val backupFile = File(filesDir, "boards.json.bak")
     private val foldersFile = File(filesDir, "folders.json")
@@ -38,6 +40,7 @@ class BoardRepository(context: Context) {
     private var cachedFolders: List<InkFolder> = emptyList()
     private var transactionalLoaded = false
     private var legacyFoldersLoaded = false
+    private var lastCheckpointSequence = 0L
 
     var loadError: String? = null
         private set
@@ -64,6 +67,10 @@ class BoardRepository(context: Context) {
     @Synchronized
     fun load(): List<InkBoard> {
         if (transactionalStore.hasPublishedData()) return loadTransactional().first
+        if (journal.hasData) {
+            loadError = "Найден journal без базового checkpoint. Исходные данные сохранены; запись заблокирована до восстановления."
+            return emptyList()
+        }
 
         val separate = loadSeparateDocuments()
         val boards = separate ?: loadLegacyBoardsArray()
@@ -83,6 +90,10 @@ class BoardRepository(context: Context) {
     @Synchronized
     fun loadFolders(): List<InkFolder> {
         if (transactionalStore.hasPublishedData()) return loadTransactional().second
+        if (journal.hasData) {
+            loadError = loadError ?: "Найден journal без базового checkpoint."
+            return emptyList()
+        }
         if (!legacyFoldersLoaded) {
             cachedFolders = loadLegacyFoldersInternal()
             legacyFoldersLoaded = true
@@ -90,29 +101,79 @@ class BoardRepository(context: Context) {
         return cachedFolders
     }
 
-    /** Publishes documents and folder metadata as one durable generation. */
+    /**
+     * Durably records one logical library mutation. The common path appends and fsyncs a journal
+     * delta; a full checkpoint is written only periodically. Therefore a confirmed pen-up does not
+     * require rewriting every unchanged document in the library.
+     */
     @Synchronized
     fun saveLibrary(boards: List<InkBoard>, folders: List<InkFolder>): LocalSaveReceipt {
         check(loadError == null) { loadError.orEmpty() }
         validateBoards(boards)
         validateFolders(folders)
-        val documents = LinkedHashMap<String, String>(boards.size)
-        boards.forEach { board -> documents[board.id] = board.toJson().toString() }
-        val commit = transactionalStore.commit(documents, foldersToJson(folders).toString())
-        cachedBoards = boards.toList()
-        cachedFolders = folders.toList()
-        transactionalLoaded = true
-        lastCommittedSequence = commit.sequence
-        return LocalSaveReceipt(commit.sequence, commit.committedAt)
+        ensureTransactionalStateLoadedForWrite()
+
+        if (!transactionalStore.hasPublishedData()) {
+            val documents = documentsJson(boards)
+            val commit = transactionalStore.commit(documents, foldersToJson(folders).toString(), requestedSequence = 1L)
+            cachedBoards = boards.toList()
+            cachedFolders = folders.toList()
+            transactionalLoaded = true
+            lastCheckpointSequence = commit.sequence
+            lastCommittedSequence = commit.sequence
+            return LocalSaveReceipt(commit.sequence, commit.committedAt, checkpointed = true)
+        }
+
+        val mutation = buildMutation(cachedBoards, boards, cachedFolders, folders)
+        if (mutation == null) {
+            return LocalSaveReceipt(lastCommittedSequence, System.currentTimeMillis(), checkpointed = false)
+        }
+
+        val sequence = lastCommittedSequence + 1L
+        val entry = journal.append(sequence, mutation.toString())
+        applyMutationToCache(entry.payload)
+        lastCommittedSequence = sequence
+
+        val shouldCheckpoint = journal.entryCountAfter(lastCheckpointSequence) >= CHECKPOINT_ENTRY_LIMIT ||
+            journal.sizeBytes >= CHECKPOINT_BYTES_LIMIT
+        if (shouldCheckpoint) {
+            val commit = checkpointInternal()
+            return LocalSaveReceipt(sequence, commit.committedAt, checkpointed = true)
+        }
+        return LocalSaveReceipt(sequence, System.currentTimeMillis(), checkpointed = false)
     }
 
-    /** Compatibility entry point. Prefer saveLibrary() so folder metadata shares the same generation. */
+    /** Force a checkpoint without changing the durable sequence. Safe to call on lifecycle stop. */
+    @Synchronized
+    fun checkpoint(): LocalSaveReceipt? {
+        check(loadError == null) { loadError.orEmpty() }
+        if (!transactionalStore.hasPublishedData() || lastCommittedSequence <= lastCheckpointSequence) return null
+        val commit = checkpointInternal()
+        return LocalSaveReceipt(commit.sequence, commit.committedAt, checkpointed = true)
+    }
+
     @Synchronized
     fun save(boards: List<InkBoard>): LocalSaveReceipt = saveLibrary(boards, cachedFolders)
 
-    /** Compatibility entry point. Prefer saveLibrary() so documents share the same generation. */
     @Synchronized
     fun saveFolders(folders: List<InkFolder>): LocalSaveReceipt = saveLibrary(cachedBoards, folders)
+
+    private fun ensureTransactionalStateLoadedForWrite() {
+        if (transactionalLoaded) return
+        if (transactionalStore.hasPublishedData()) loadTransactional()
+    }
+
+    private fun checkpointInternal(): LibraryStoreCommit {
+        val commit = transactionalStore.commit(
+            documentsJson(cachedBoards),
+            foldersToJson(cachedFolders).toString(),
+            requestedSequence = lastCommittedSequence
+        )
+        // Preserve all records needed to reconstruct from the previous retained checkpoint.
+        journal.compactThrough(commit.previousSequence)
+        lastCheckpointSequence = commit.sequence
+        return commit
+    }
 
     private fun loadTransactional(): Pair<List<InkBoard>, List<InkFolder>> {
         if (transactionalLoaded) return cachedBoards to cachedFolders
@@ -121,22 +182,115 @@ class BoardRepository(context: Context) {
                 loadError = "Локальное хранилище повреждено. Исходные generation сохранены: ${it.message}"
                 return emptyList<InkBoard>() to emptyList()
             } ?: return emptyList<InkBoard>() to emptyList()
+
+        val documents = LinkedHashMap(snapshot.documents)
+        var foldersJson = snapshot.foldersJson
+        val replay = runCatching { journal.read(afterSequence = snapshot.sequence) }
+            .getOrElse {
+                loadError = "Журнал локальных изменений повреждён: ${it.message}"
+                return emptyList<InkBoard>() to emptyList()
+            }
+        runCatching {
+            replay.entries.forEach { entry ->
+                val state = applyMutation(documents, foldersJson, entry.payload)
+                documents.clear()
+                documents.putAll(state.first)
+                foldersJson = state.second
+            }
+        }.getOrElse {
+            loadError = "Не удалось восстановить подтверждённые изменения из journal: ${it.message}"
+            return emptyList<InkBoard>() to emptyList()
+        }
+
         val boards = runCatching {
-            snapshot.documents.values.map { JSONObject(it).toBoard() }.also(::validateBoards)
+            documents.values.map { JSONObject(it).toBoard() }.also(::validateBoards)
         }.getOrElse {
             loadError = "Документ имеет повреждённую или более новую схему. Запись заблокирована: ${it.message}"
             return emptyList<InkBoard>() to emptyList()
         }
-        val folders = runCatching { parseFolders(JSONArray(snapshot.foldersJson)) }
+        val folders = runCatching { parseFolders(JSONArray(foldersJson)) }
             .getOrElse {
                 loadError = "Не удалось прочитать метаданные папок: ${it.message}"
                 return boards to emptyList()
             }
+
         cachedBoards = boards
         cachedFolders = folders
-        lastCommittedSequence = snapshot.sequence
+        lastCheckpointSequence = snapshot.sequence
+        lastCommittedSequence = maxOf(snapshot.sequence, replay.entries.lastOrNull()?.sequence ?: journal.latestSequence())
         transactionalLoaded = true
         return boards to folders
+    }
+
+    private fun buildMutation(
+        beforeBoards: List<InkBoard>,
+        afterBoards: List<InkBoard>,
+        beforeFolders: List<InkFolder>,
+        afterFolders: List<InkFolder>
+    ): JSONObject? {
+        if (beforeBoards == afterBoards && beforeFolders == afterFolders) return null
+        val old = beforeBoards.associateBy { it.id }
+        val fresh = afterBoards.associateBy { it.id }
+        val changed = afterBoards.filter { old[it.id] != it }
+        val deleted = beforeBoards.map { it.id }.filter { it !in fresh }
+        val orderChanged = beforeBoards.map { it.id } != afterBoards.map { it.id }
+        val foldersChanged = beforeFolders != afterFolders
+
+        return JSONObject().apply {
+            put("version", JOURNAL_MUTATION_VERSION)
+            put("upsert", JSONArray().apply { changed.forEach { put(it.toJson()) } })
+            put("delete", JSONArray(deleted))
+            if (orderChanged) put("order", JSONArray(afterBoards.map { it.id }))
+            if (foldersChanged) put("folders", foldersToJson(afterFolders))
+        }
+    }
+
+    private fun applyMutationToCache(payload: String) {
+        val documents = documentsJson(cachedBoards)
+        val state = applyMutation(documents, foldersToJson(cachedFolders).toString(), payload)
+        cachedBoards = state.first.values.map { JSONObject(it).toBoard() }.also(::validateBoards)
+        cachedFolders = parseFolders(JSONArray(state.second))
+    }
+
+    private fun applyMutation(
+        baseDocuments: LinkedHashMap<String, String>,
+        baseFoldersJson: String,
+        payload: String
+    ): Pair<LinkedHashMap<String, String>, String> {
+        val root = JSONObject(payload)
+        require(root.getInt("version") == JOURNAL_MUTATION_VERSION) { "Неподдерживаемая версия journal mutation" }
+        val documents = LinkedHashMap(baseDocuments)
+
+        val deleted = root.optJSONArray("delete") ?: JSONArray()
+        repeat(deleted.length()) {
+            val id = deleted.getString(it)
+            require(safeId(id))
+            documents.remove(id)
+        }
+
+        val upsert = root.optJSONArray("upsert") ?: JSONArray()
+        repeat(upsert.length()) {
+            val json = upsert.getJSONObject(it)
+            val board = json.toBoard()
+            validateBoards(listOf(board))
+            documents[board.id] = board.toJson().toString()
+        }
+
+        val order = root.optJSONArray("order")
+        val ordered = if (order != null) {
+            val ids = List(order.length()) { order.getString(it) }
+            require(ids.distinct().size == ids.size)
+            require(ids.toSet() == documents.keys.toSet()) { "Journal order не соответствует набору документов" }
+            LinkedHashMap<String, String>().apply { ids.forEach { id -> put(id, documents.getValue(id)) } }
+        } else documents
+
+        val foldersJson = root.optJSONArray("folders")?.toString() ?: baseFoldersJson
+        parseFolders(JSONArray(foldersJson))
+        return ordered to foldersJson
+    }
+
+    private fun documentsJson(boards: List<InkBoard>) = LinkedHashMap<String, String>(boards.size).apply {
+        boards.forEach { board -> put(board.id, board.toJson().toString()) }
     }
 
     private fun loadSeparateDocuments(): List<InkBoard>? {
@@ -449,6 +603,9 @@ class BoardRepository(context: Context) {
 
     companion object {
         private const val BOARD_SCHEMA_VERSION = 2
+        private const val JOURNAL_MUTATION_VERSION = 1
+        private const val CHECKPOINT_ENTRY_LIMIT = 32
+        private const val CHECKPOINT_BYTES_LIMIT = 4L * 1024L * 1024L
     }
 }
 

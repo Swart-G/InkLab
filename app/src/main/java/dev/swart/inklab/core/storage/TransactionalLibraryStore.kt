@@ -15,20 +15,17 @@ internal data class LibraryStoreSnapshot(
 
 internal data class LibraryStoreCommit(
     val sequence: Long,
-    val committedAt: Long
+    val previousSequence: Long,
+    val committedAt: Long,
+    val generationId: Long
 )
 
 /**
- * Crash-safe local library store.
+ * Crash-safe checkpoint store.
  *
- * A published generation is a small manifest referenced by CURRENT. Document payloads use
- * alternating A/B slots. A new payload is always written to the slot that is NOT referenced by
- * the currently published manifest. Therefore a process death before CURRENT is switched leaves
- * the previous generation intact; after CURRENT is switched the new generation is complete.
- *
- * Only the current and immediately previous generation are required for recovery. Payload slots
- * are intentionally not deleted here: deletion/GC is a separate lifecycle concern and must never
- * be part of the durability boundary.
+ * generationId identifies a physical immutable checkpoint. journalSequence identifies the newest
+ * durable logical mutation included in it. They are deliberately separate: an abandoned or corrupt
+ * generation may consume a physical ID without consuming a logical save sequence.
  */
 internal class TransactionalLibraryStore(private val root: File) {
     private val documentsDirectory = File(root, "documents")
@@ -36,14 +33,10 @@ internal class TransactionalLibraryStore(private val root: File) {
     private val currentFile = File(root, "CURRENT")
     private var activeManifest: Manifest? = null
 
-    private data class DocumentRef(
-        val id: String,
-        val slot: String,
-        val sha256: String
-    )
-
+    private data class DocumentRef(val id: String, val slot: String, val sha256: String)
     private data class Manifest(
-        val sequence: Long,
+        val generationId: Long,
+        val journalSequence: Long,
         val committedAt: Long,
         val documents: List<DocumentRef>,
         val foldersJson: String
@@ -65,18 +58,16 @@ internal class TransactionalLibraryStore(private val root: File) {
                 ?.forEach { if (it !in this) add(it) }
         }
         var lastError: Throwable? = null
-        for (sequence in candidates) {
-            val manifest = runCatching { readManifest(sequence, verifyPayloads = true) }
+        for (generation in candidates) {
+            val manifest = runCatching { readManifest(generation, verifyPayloads = true) }
                 .onFailure { lastError = it }
                 .getOrNull() ?: continue
             activeManifest = manifest
-            if (preferred != sequence) writeAtomic(currentFile, sequence.toString())
+            if (preferred != generation) writeAtomic(currentFile, generation.toString())
             val documents = linkedMapOf<String, String>()
-            manifest.documents.forEach { ref ->
-                documents[ref.id] = payloadFile(ref).readText(Charsets.UTF_8)
-            }
+            manifest.documents.forEach { ref -> documents[ref.id] = payloadFile(ref).readText(Charsets.UTF_8) }
             return LibraryStoreSnapshot(
-                sequence = manifest.sequence,
+                sequence = manifest.journalSequence,
                 committedAt = manifest.committedAt,
                 documents = documents,
                 foldersJson = manifest.foldersJson
@@ -86,19 +77,22 @@ internal class TransactionalLibraryStore(private val root: File) {
     }
 
     @Synchronized
-    fun commit(documents: Map<String, String>, foldersJson: String): LibraryStoreCommit {
+    fun commit(documents: Map<String, String>, foldersJson: String, requestedSequence: Long): LibraryStoreCommit {
         root.mkdirs()
         documentsDirectory.mkdirs()
         generationsDirectory.mkdirs()
+        require(requestedSequence > 0L)
         require(documents.keys.all(::safeId)) { "Недопустимый documentId" }
         JSONArray(foldersJson)
 
         if (activeManifest == null && hasPublishedData()) load()
         val previous = activeManifest
+        require(requestedSequence > (previous?.journalSequence ?: 0L)) {
+            "Checkpoint journal sequence must increase: $requestedSequence <= ${previous?.journalSequence ?: 0L}"
+        }
         val previousRefs = previous?.documents?.associateBy { it.id }.orEmpty()
         val refs = ArrayList<DocumentRef>(documents.size)
 
-        // LinkedHashMap from BoardRepository preserves the user-visible library order.
         documents.forEach { (id, content) ->
             JSONObject(content)
             val hash = sha256(content.toByteArray(Charsets.UTF_8))
@@ -115,30 +109,42 @@ internal class TransactionalLibraryStore(private val root: File) {
             }
         }
 
-        val maxKnownSequence = generationsDirectory.listFiles()
-            ?.mapNotNull(::generationNumber)
-            ?.maxOrNull() ?: 0L
-        val sequence = maxOf(previous?.sequence ?: 0L, maxKnownSequence) + 1L
+        val maxKnownGeneration = generationsDirectory.listFiles()?.mapNotNull(::generationNumber)?.maxOrNull() ?: 0L
+        val generationId = maxOf(previous?.generationId ?: 0L, maxKnownGeneration) + 1L
         val committedAt = System.currentTimeMillis()
-        val manifest = Manifest(sequence, committedAt, refs, JSONArray(foldersJson).toString())
-        writeAtomic(generationFile(sequence), manifest.toJson().toString())
-        val verified = readManifest(sequence, verifyPayloads = true)
-        writeAtomic(currentFile, sequence.toString())
+        val manifest = Manifest(
+            generationId = generationId,
+            journalSequence = requestedSequence,
+            committedAt = committedAt,
+            documents = refs,
+            foldersJson = JSONArray(foldersJson).toString()
+        )
+        writeAtomic(generationFile(generationId), manifest.toJson().toString())
+        val verified = readManifest(generationId, verifyPayloads = true)
+        writeAtomic(currentFile, generationId.toString())
         activeManifest = verified
-        pruneGenerationManifests(sequence)
-        return LibraryStoreCommit(sequence, committedAt)
+        pruneGenerationManifests(generationId)
+        return LibraryStoreCommit(
+            sequence = requestedSequence,
+            previousSequence = previous?.journalSequence ?: 0L,
+            committedAt = committedAt,
+            generationId = generationId
+        )
     }
 
     fun copyForRecovery(destination: File) {
         if (root.exists()) root.copyRecursively(destination, overwrite = false)
     }
 
-    private fun readManifest(sequence: Long, verifyPayloads: Boolean): Manifest {
-        val source = generationFile(sequence)
-        require(source.isFile) { "Generation $sequence отсутствует" }
+    private fun readManifest(generationId: Long, verifyPayloads: Boolean): Manifest {
+        val source = generationFile(generationId)
+        require(source.isFile) { "Generation $generationId отсутствует" }
         val json = JSONObject(source.readText(Charsets.UTF_8))
         require(json.getInt("storageVersion") == STORAGE_VERSION) { "Неподдерживаемая версия local store" }
-        require(json.getLong("sequence") == sequence) { "Неверный номер generation" }
+        val storedGeneration = json.optLong("generationId", json.optLong("sequence", -1L))
+        require(storedGeneration == generationId) { "Неверный номер generation" }
+        val journalSequence = json.optLong("journalSequence", json.optLong("sequence", generationId))
+        require(journalSequence > 0L)
         val items = json.getJSONArray("documents")
         val refs = List(items.length()) { index ->
             val item = items.getJSONObject(index)
@@ -160,7 +166,8 @@ internal class TransactionalLibraryStore(private val root: File) {
         }
         val folders = json.optJSONArray("folders") ?: JSONArray()
         return Manifest(
-            sequence = sequence,
+            generationId = generationId,
+            journalSequence = journalSequence,
             committedAt = json.optLong("committedAt", 0L),
             documents = refs,
             foldersJson = folders.toString()
@@ -169,7 +176,8 @@ internal class TransactionalLibraryStore(private val root: File) {
 
     private fun Manifest.toJson() = JSONObject().apply {
         put("storageVersion", STORAGE_VERSION)
-        put("sequence", sequence)
+        put("generationId", generationId)
+        put("journalSequence", journalSequence)
         put("committedAt", committedAt)
         put("documents", JSONArray().apply {
             documents.forEach { ref ->
@@ -184,7 +192,7 @@ internal class TransactionalLibraryStore(private val root: File) {
     }
 
     private fun payloadFile(ref: DocumentRef) = File(documentsDirectory, "${ref.id}.${ref.slot}.json")
-    private fun generationFile(sequence: Long) = File(generationsDirectory, "g-$sequence.json")
+    private fun generationFile(generationId: Long) = File(generationsDirectory, "g-$generationId.json")
 
     private fun generationNumber(file: File): Long? {
         if (!file.isFile) return null
