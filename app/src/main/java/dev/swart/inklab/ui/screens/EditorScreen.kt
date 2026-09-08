@@ -97,6 +97,7 @@ import dev.swart.inklab.core.model.ConvertedInkKind
 import dev.swart.inklab.core.model.DocumentFormat
 import dev.swart.inklab.core.model.PaperPattern
 import dev.swart.inklab.core.recognition.RecognitionMode
+import dev.swart.inklab.core.recognition.RecognitionSourceState
 import dev.swart.inklab.core.storage.EraserMode
 import dev.swart.inklab.ui.AppScreen
 import dev.swart.inklab.ui.EditorLayoutPolicy
@@ -599,19 +600,52 @@ private fun BoxWithConstraintsScope.ObjectMenu(vm: EditorViewModel, context: and
 @Composable
 private fun RecognitionStatus(vm: EditorViewModel, modifier: Modifier = Modifier) {
     val state = vm.recognition ?: return
-    if (state.result != null && state.mode == RecognitionMode.TEXT) {
+    val result = state.result
+    if (result != null) {
+        val conflict = state.sourceState != RecognitionSourceState.UNCHANGED
         AlertDialog(
             onDismissRequest = { vm.recognition = null },
-            title = { Text("Результат распознавания") },
+            title = {
+                Text(
+                    when {
+                        conflict -> "Результат готов — исходник изменён"
+                        state.mode == RecognitionMode.MATH -> "Результат формулы"
+                        else -> "Результат распознавания"
+                    }
+                )
+            },
             text = {
-                Column {
-                    state.result.candidates.ifEmpty { listOf(state.result.primary) }.take(5).forEach { candidate ->
-                        TextButton(onClick = { vm.chooseRecognitionCandidate(candidate) }) { Text(candidate) }
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    when (state.sourceState) {
+                        RecognitionSourceState.SOURCE_CHANGED -> Text(
+                            "Пока шло распознавание, исходная рукопись изменилась. Автоматическая замена заблокирована; результат можно вставить отдельной копией, не удаляя актуальные штрихи."
+                        )
+                        RecognitionSourceState.LOCATION_CHANGED -> Text(
+                            if (vm.canApplyRecognitionCopy)
+                                "Результат относится к этому листу, но исходный snapshot уже нельзя безопасно заменить. Его можно вставить отдельной копией."
+                            else
+                                "Результат сохранён для исходного листа. Вернитесь на него, чтобы вставить результат отдельной копией."
+                        )
+                        RecognitionSourceState.UNCHANGED -> Unit
+                    }
+                    if (state.mode == RecognitionMode.TEXT) {
+                        result.candidates.ifEmpty { listOf(result.primary) }.take(5).forEach { candidate ->
+                            TextButton(onClick = { vm.chooseRecognitionCandidate(candidate) }) { Text(candidate) }
+                        }
+                    } else {
+                        Text(result.primary, style = MaterialTheme.typography.bodyLarge)
                     }
                 }
             },
-            confirmButton = { TextButton(onClick = vm::applyRecognition) { Text("Вставить") } },
-            dismissButton = { TextButton(onClick = { vm.recognition = null }) { Text("Отмена") } }
+            confirmButton = {
+                when {
+                    state.sourceState == RecognitionSourceState.UNCHANGED ->
+                        TextButton(onClick = vm::applyRecognition) { Text("Заменить рукопись") }
+                    vm.canApplyRecognitionCopy ->
+                        TextButton(onClick = vm::applyRecognitionAsCopy) { Text("Вставить как копию") }
+                }
+            },
+            dismissButton = { TextButton(onClick = { vm.recognition = null }) { Text(if (conflict) "Закрыть" else "Отмена") } }
         )
         return
     }
