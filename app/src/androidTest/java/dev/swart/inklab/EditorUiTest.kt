@@ -19,6 +19,13 @@ class EditorUiTest {
     @get:Rule
     val compose = createAndroidComposeRule<MainActivity>()
 
+    private fun openViewMenu() {
+        compose.onNodeWithContentDescription("Масштаб и вид")
+            .performScrollTo()
+            .assertIsDisplayed()
+            .performClick()
+    }
+
     @Test
     fun editorPagesCompactChromeAndSettingsAreReachable() {
         compose.onNodeWithText("Библиотека").assertIsDisplayed()
@@ -33,12 +40,13 @@ class EditorUiTest {
         compose.onNodeWithText("+ Лист").performClick()
         compose.onNodeWithText("Лист 2").assertExists()
 
-        // Zoom/fit no longer consumes a permanent third row.
+        // Zoom/fit no longer consumes a permanent third row. On very narrow windows secondary
+        // controls remain reachable by scrolling the toolbar instead of shrinking touch targets.
         compose.onNodeWithText("По ширине").assertDoesNotExist()
         compose.onNodeWithText("Лист целиком").assertDoesNotExist()
-        compose.onNodeWithContentDescription("Масштаб и вид").performClick()
+        openViewMenu()
         compose.onNodeWithText("По ширине").assertIsDisplayed().performClick()
-        compose.onNodeWithContentDescription("Масштаб и вид").performClick()
+        openViewMenu()
         compose.onNodeWithText("Лист целиком").assertIsDisplayed().performClick()
 
         compose.waitUntil(5000) { !ViewModelProvider(compose.activity)[EditorViewModel::class.java].saving }
@@ -53,7 +61,7 @@ class EditorUiTest {
             toolbar.sameAs(compose.onNodeWithTag("documentToolbar").captureToImage().asAndroidBitmap())
         )
 
-        compose.onNodeWithContentDescription("Масштаб и вид").performClick()
+        openViewMenu()
         compose.onNodeWithText("Режим фокуса").assertIsDisplayed().performClick()
         compose.onNodeWithContentDescription("Меню").assertDoesNotExist()
         compose.onNodeWithContentDescription("Выйти из режима фокуса").assertIsDisplayed().performClick()
@@ -80,7 +88,7 @@ class EditorUiTest {
         compose.runOnUiThread { ViewModelProvider(compose.activity)[EditorViewModel::class.java].createBoard() }
 
         compose.onNodeWithText("Исходный вид").assertDoesNotExist()
-        compose.onNodeWithContentDescription("Масштаб и вид").performClick()
+        openViewMenu()
         compose.onNodeWithText("Исходный вид").assertIsDisplayed().performClick()
         compose.onNodeWithText("Лист целиком").assertDoesNotExist()
         compose.onNodeWithText("+ Лист").assertDoesNotExist()
