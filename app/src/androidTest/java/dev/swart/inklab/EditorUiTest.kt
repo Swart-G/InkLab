@@ -2,18 +2,7 @@ package dev.swart.inklab
 
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.asAndroidBitmap
-import androidx.compose.ui.test.assertDoesNotExist
-import androidx.compose.ui.test.assertExists
-import androidx.compose.ui.test.assertIsDisplayed
-import androidx.compose.ui.test.captureToImage
-import androidx.compose.ui.test.hasScrollToIndexAction
-import androidx.compose.ui.test.hasText
-import androidx.compose.ui.test.onNode
-import androidx.compose.ui.test.onNodeWithContentDescription
-import androidx.compose.ui.test.onNodeWithTag
-import androidx.compose.ui.test.onNodeWithText
-import androidx.compose.ui.test.performClick
-import androidx.compose.ui.test.performScrollToNode
+import androidx.compose.ui.test.*
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.lifecycle.ViewModelProvider
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -92,7 +81,7 @@ class EditorUiTest {
 
         compose.onNodeWithText("Исходный вид").assertDoesNotExist()
         compose.onNodeWithContentDescription("Масштаб и вид").performClick()
-        compose.onNodeWithText("Исходный вид").assertIsDisplayed()
+        compose.onNodeWithText("Исходный вид").assertIsDisplayed().performClick()
         compose.onNodeWithText("Лист целиком").assertDoesNotExist()
         compose.onNodeWithText("+ Лист").assertDoesNotExist()
         compose.onNodeWithText("Страницы").assertDoesNotExist()
