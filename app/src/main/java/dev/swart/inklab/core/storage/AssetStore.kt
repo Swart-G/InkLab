@@ -87,11 +87,8 @@ class AssetStore(private val context: Context) {
             require(detected.kind == expectedKind) {
                 "Выбранный файл имеет тип ${detected.kind}, ожидался $expectedKind"
             }
-            // Provider MIME is only a hint. Content magic is authoritative, but clearly incompatible
-            // provider metadata is useful diagnostics and must never change the stored canonical MIME.
-            if (reportedMimeType != null) {
-                require(reportedMimeType.isNotBlank()) { "Пустой MIME type" }
-            }
+            // Content magic is authoritative. Provider MIME is only a hint and is never persisted.
+            if (reportedMimeType != null) require(reportedMimeType.isNotBlank()) { "Пустой MIME type" }
 
             val hash = digest.digest().toHex()
             val id = "a-$hash"
@@ -124,13 +121,21 @@ class AssetStore(private val context: Context) {
             ?: throw IllegalStateException("Asset metadata отсутствует: $id")
     }
 
+    /** Corrupt metadata is surfaced to the caller; it is never silently omitted from diagnostics. */
     @Synchronized
     fun list(): List<StoredAsset> {
         if (!metadata.isDirectory) return emptyList()
         return metadata.listFiles()
             .orEmpty()
-            .filter { it.isFile && it.name.endsWith(".json") }
-            .mapNotNull { file -> runCatching { readMetadata(file, verifyFile = true) }.getOrNull() }
+            .mapNotNull { file ->
+                when {
+                    file.name.endsWith(".json") -> file
+                    file.name.endsWith(".json.bak") -> File(metadata, file.name.removeSuffix(".bak"))
+                    else -> null
+                }
+            }
+            .distinctBy { it.name }
+            .map { file -> readMetadata(file, verifyFile = true) ?: error("Не удалось прочитать ${file.name}") }
             .sortedBy { it.createdAt }
     }
 
@@ -178,8 +183,10 @@ class AssetStore(private val context: Context) {
         verifyFile: Boolean,
         verifyContent: Boolean = false
     ): StoredAsset? {
-        if (!source.isFile) return null
-        val json = JSONObject(source.readText(Charsets.UTF_8))
+        val atomic = AtomicFile(source)
+        if (!atomic.exists()) return null
+        val text = atomic.openRead().bufferedReader(Charsets.UTF_8).use { it.readText() }
+        val json = JSONObject(text)
         require(json.getInt("version") == METADATA_VERSION) { "Неподдерживаемая версия asset metadata" }
         val id = json.getString("id")
         val hash = json.getString("sha256")
@@ -197,7 +204,11 @@ class AssetStore(private val context: Context) {
         if (verifyFile) {
             require(file.isFile) { "Отсутствуют bytes asset $id" }
             require(file.length() == size) { "Размер asset $id не совпадает с metadata" }
-            if (verifyContent) require(sha256(file) == hash) { "Checksum mismatch: $id" }
+            if (verifyContent) {
+                require(sha256(file) == hash) { "Checksum mismatch: $id" }
+                val detected = detectFile(file) ?: throw IllegalArgumentException("Asset $id имеет повреждённый magic header")
+                require(detected.kind == kind && detected.mimeType == mime) { "Тип bytes asset $id не совпадает с metadata" }
+            }
         }
         return StoredAsset(id, kind, mime, size, hash, createdAt, file)
     }
@@ -206,6 +217,12 @@ class AssetStore(private val context: Context) {
     private fun metadataFile(id: String) = File(metadata, "$id.json")
 
     private data class DetectedType(val kind: AssetKind, val mimeType: String)
+
+    private fun detectFile(file: File): DetectedType? {
+        val header = ByteArray(HEADER_BYTES)
+        val count = file.inputStream().use { it.read(header) }.coerceAtLeast(0)
+        return detect(header, count)
+    }
 
     private fun detect(header: ByteArray, size: Int): DetectedType? {
         fun ascii(offset: Int, value: String): Boolean {
