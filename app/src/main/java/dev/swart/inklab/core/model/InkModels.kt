@@ -4,6 +4,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import java.util.UUID
+import kotlin.math.abs
 
 data class InkPoint(
     val x: Float,
@@ -62,6 +63,11 @@ data class PageSourceBox(
     val right: Float,
     val bottom: Float
 ) {
+    init {
+        require(listOf(left, top, right, bottom).all(Float::isFinite)) { "Page source box must be finite" }
+        require(right > left && bottom > top) { "Page source box must have positive area" }
+    }
+
     val width: Float get() = right - left
     val height: Float get() = bottom - top
 }
@@ -77,7 +83,13 @@ data class PageBackgroundTransform(
     val d: Float = 1f,
     val tx: Float = 0f,
     val ty: Float = 0f
-)
+) {
+    init {
+        require(listOf(a, b, c, d, tx, ty).all(Float::isFinite)) { "Page background transform must be finite" }
+        val determinant = a * d - b * c
+        require(determinant.isFinite() && abs(determinant) > 1e-8f) { "Page background transform must be invertible" }
+    }
+}
 
 /**
  * Page-local background metadata. `null` on InkPage means "inherit document paper settings".
