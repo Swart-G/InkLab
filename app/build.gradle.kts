@@ -21,7 +21,7 @@ android {
         minSdk = 24
         targetSdk = 36
         versionCode = ciVersionCode
-        versionName = "2.0.1"
+        versionName = "2.0.2"
         vectorDrawables.useSupportLibrary = true
         ndk.abiFilters += providers.gradleProperty("testAbi").getOrElse("arm64-v8a")
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"

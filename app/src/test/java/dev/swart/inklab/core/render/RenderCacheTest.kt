@@ -6,7 +6,7 @@ import org.junit.Test
 
 class RenderCacheTest {
     @Test fun evictsLeastRecentlyUsedByByteBudget() {
-        val cache = RenderCache<String, String>(5) { it.length.toLong() }
+        val cache = RenderCache<String, String>(maxBytes = 5, sizeOf = { it.length.toLong() })
         cache.put("a", 1, "aa")
         cache.put("b", 1, "bb")
         cache.get("a", 1)
@@ -17,7 +17,7 @@ class RenderCacheTest {
     }
 
     @Test fun staleGenerationIsNeverReturned() {
-        val cache = RenderCache<String, String>(20) { it.length.toLong() }
+        val cache = RenderCache<String, String>(maxBytes = 20, sizeOf = { it.length.toLong() })
         cache.put("page", 5, "old")
         assertNull(cache.get("page", 6))
         assertEquals(0, cache.size())
