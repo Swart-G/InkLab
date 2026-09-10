@@ -6,7 +6,7 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
-val ciVersionCode = 204_000 + (System.getenv("GITHUB_RUN_NUMBER")
+val ciVersionCode = 205_000 + (System.getenv("GITHUB_RUN_NUMBER")
     ?.toIntOrNull()
     ?.coerceAtLeast(2)
     ?: 0)
@@ -21,7 +21,7 @@ android {
         minSdk = 24
         targetSdk = 36
         versionCode = ciVersionCode
-        versionName = "2.0.4"
+        versionName = "2.0.5"
         vectorDrawables.useSupportLibrary = true
         ndk.abiFilters += providers.gradleProperty("testAbi").getOrElse("arm64-v8a")
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"

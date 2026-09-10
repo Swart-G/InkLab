@@ -285,7 +285,7 @@ fun BoardsScreen(vm: EditorViewModel) {
     }
     movingBoardId?.let { boardId ->
         vm.boards.firstOrNull { it.id == boardId }?.let { board ->
-            FolderPickerDialog(board, vm.folders, { movingBoardId = null }) { folderId ->
+            DocumentFolderPickerDialog(board, vm.folders, { movingBoardId = null }) { folderId ->
                 vm.moveDocument(boardId, folderId)
                 movingBoardId = null
             }
@@ -383,7 +383,7 @@ private fun BoardCard(
 }
 
 @Composable
-private fun FolderPickerDialog(
+internal fun DocumentFolderPickerDialog(
     board: InkBoard,
     folders: List<InkFolder>,
     dismiss: () -> Unit,

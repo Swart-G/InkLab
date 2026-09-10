@@ -23,7 +23,6 @@ import dev.swart.inklab.core.ink.splitStrokeByCircle
 import dev.swart.inklab.core.ink.strokeBounds
 import dev.swart.inklab.core.ink.strokeHitTest
 import dev.swart.inklab.core.ink.strokeIntersectsCircle
-import dev.swart.inklab.core.ink.shapePreviewMatches
 import dev.swart.inklab.core.model.BoardSettings
 import dev.swart.inklab.core.model.ConvertedInkKind
 import dev.swart.inklab.core.model.ConvertedInkObject
@@ -143,7 +142,9 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     var stylusInContact by mutableStateOf(false)
         private set
     var eraserCursor by mutableStateOf<Offset?>(null)
-    private var shapePreviewTimestamp: Long? = null
+    var shapePreviewStroke by mutableStateOf<InkStroke?>(null)
+        private set
+    private var shapePreviewAnchor: Offset? = null
 
     private val history = DocumentHistory()
     private var eraserGestureChanged = false
@@ -320,6 +321,37 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         if (index < 0 || title.isBlank()) return
         boards[index] = boards[index].copy(title = title.trim(), updatedAt = System.currentTimeMillis())
         scheduleSave()
+    }
+
+    fun duplicateDocument(id: String): InkBoard? {
+        if (id == currentBoardId) persistCurrentBoard()
+        val source = boards.firstOrNull { it.id == id && it.deletedAt == null } ?: return null
+        fun duplicateStroke(stroke: InkStroke) = stroke.copy(id = UUID.randomUUID().toString())
+        fun duplicatePage(page: InkPage) = page.copy(
+            id = UUID.randomUUID().toString(),
+            strokes = page.strokes.map(::duplicateStroke),
+            convertedObjects = page.convertedObjects.map { item ->
+                item.copy(
+                    id = UUID.randomUUID().toString(),
+                    sourceStrokes = item.sourceStrokes.map(::duplicateStroke)
+                )
+            }
+        )
+        val now = System.currentTimeMillis()
+        val copy = source.copy(
+            id = UUID.randomUUID().toString(),
+            title = "${source.title} (копия)",
+            createdAt = now,
+            updatedAt = now,
+            pages = source.pages.map(::duplicatePage),
+            trashedPages = emptyList(),
+            deletedAt = null,
+            lastPageIndex = source.lastPageIndex.coerceIn(0, source.pages.lastIndex)
+        )
+        val sourceIndex = boards.indexOf(source)
+        boards.add((sourceIndex + 1).coerceAtMost(boards.size), copy)
+        scheduleSave()
+        return copy
     }
 
     fun updateBoard(title: String, subject: String, settings: BoardSettings) {
@@ -504,7 +536,8 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         history.cancelPending()
         inputSnapshot?.let { restore(it) }
         currentPoints.clear(); lassoPoints.clear(); eraserCursor = null
-        shapePreviewTimestamp = null
+        shapePreviewStroke = null
+        shapePreviewAnchor = null
         movingSelection = false; movingConverted = false; eraserGestureChanged = false
         inputSnapshot = null
         setStylusContact(false)
@@ -628,7 +661,8 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun startStroke(point: InkPoint) {
-        shapePreviewTimestamp = null
+        shapePreviewStroke = null
+        shapePreviewAnchor = null
         selectedConvertedId = null
         currentPoints.clear()
         currentPoints += point
@@ -643,7 +677,11 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         val delta = point.offset() - previous.offset()
         val distance = delta.getDistance()
         if (distance < 0.7f) return
-        shapePreviewTimestamp = null
+        val previewAnchor = shapePreviewAnchor
+        if (previewAnchor != null && (point.offset() - previewAnchor).getDistance() > 6f / viewportScale) {
+            shapePreviewStroke = null
+            shapePreviewAnchor = null
+        }
         val parts = (distance / 2.5f).toInt().coerceIn(1, 16)
         for (part in 1..parts) {
             val fraction = part.toFloat() / parts
@@ -660,24 +698,30 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         if (currentPoints.isNotEmpty()) {
             pushUndo()
             val stroke = InkStroke(points = currentPoints.toList(), width = penWidth, color = penColor)
-            val previewStillMatches = shapePreviewMatches(shapePreviewTimestamp, currentPoints)
-            val finished = if (inputPreferences.autoShapes && (snapToShape || previewStillMatches)) autoRecognizeShape(stroke) else stroke
+            val visiblePreview = shapePreviewStroke
+            val finished = when {
+                inputPreferences.autoShapes && visiblePreview != null -> visiblePreview
+                inputPreferences.autoShapes && snapToShape -> autoRecognizeShape(stroke)
+                else -> stroke
+            }
             val page = currentBoard?.pages?.getOrNull(currentPageIndex)
             strokes += if (notebook && page != null) dev.swart.inklab.core.ink.clipStrokeToPage(finished, Rect(page.originX,page.originY,page.originX+page.width,page.originY+page.height)) else listOf(finished)
             selectedIds = emptySet()
             persistCurrentBoard()
         }
         currentPoints.clear()
-        shapePreviewTimestamp = null
+        shapePreviewStroke = null
+        shapePreviewAnchor = null
     }
 
-    fun markShapePreviewReady(lastPointTimestamp: Long) {
+    fun markShapePreviewReady(preview: InkStroke, lastPointTimestamp: Long) {
         if (stylusInContact && currentPoints.lastOrNull()?.timestamp == lastPointTimestamp) {
-            shapePreviewTimestamp = lastPointTimestamp
+            shapePreviewStroke = preview
+            shapePreviewAnchor = currentPoints.last().offset()
         }
     }
 
-    fun cancelStroke() { currentPoints.clear(); shapePreviewTimestamp = null }
+    fun cancelStroke() { currentPoints.clear(); shapePreviewStroke = null; shapePreviewAnchor = null }
 
     fun beginErase() { eraserGestureChanged = false; selectedConvertedId = null }
 

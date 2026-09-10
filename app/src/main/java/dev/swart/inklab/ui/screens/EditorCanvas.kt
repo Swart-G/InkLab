@@ -133,11 +133,9 @@ fun EditorCanvas(vm: EditorViewModel, modifier: Modifier = Modifier) {
             }
         }
     }
-    var shapePreview by remember { mutableStateOf<InkStroke?>(null) }
     val lastPointTimestamp = vm.currentPoints.lastOrNull()?.timestamp
 
     LaunchedEffect(lastPointTimestamp, vm.stylusInContact, vm.tool, vm.inputPreferences.autoShapes) {
-        shapePreview = null
         if (
             vm.stylusInContact &&
             vm.tool == EditorTool.PEN &&
@@ -154,8 +152,7 @@ fun EditorCanvas(vm: EditorViewModel, modifier: Modifier = Modifier) {
                 val raw = InkStroke(points = vm.currentPoints.toList(), width = vm.penWidth, color = vm.penColor)
                 val corrected = autoRecognizeShape(raw)
                 if (corrected.points != raw.points) {
-                    shapePreview = corrected
-                    vm.markShapePreviewReady(lastPointTimestamp)
+                    vm.markShapePreviewReady(corrected, lastPointTimestamp)
                 }
             }
         }
@@ -300,7 +297,7 @@ fun EditorCanvas(vm: EditorViewModel, modifier: Modifier = Modifier) {
                         drawStroke(it, active && it.id in vm.selectedIds)
                     }
                     if (active) {
-                        shapePreview?.let { preview ->
+                        vm.shapePreviewStroke?.let { preview ->
                             drawStroke(preview, transient = true)
                         } ?: drawStroke(
                             InkStroke(points = vm.currentPoints, width = vm.penWidth, color = vm.penColor),

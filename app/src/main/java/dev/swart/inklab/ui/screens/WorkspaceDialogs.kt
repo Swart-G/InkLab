@@ -29,6 +29,7 @@ import dev.swart.inklab.AppContainer
 import dev.swart.inklab.core.model.*
 import dev.swart.inklab.core.export.*
 import dev.swart.inklab.core.recognition.ProviderState
+import dev.swart.inklab.core.packageformat.InkLabPackage
 import dev.swart.inklab.ui.EditorViewModel
 import dev.swart.inklab.ui.theme.*
 import com.google.mlkit.vision.digitalink.recognition.DigitalInkRecognitionModelIdentifier
@@ -46,6 +47,9 @@ fun WorkspaceDialogs(vm: EditorViewModel) {
     var busy by remember { mutableStateOf(false) }
     var exportIndices by remember { mutableStateOf<List<Int>>(emptyList()) }
     var exportingBoard by remember { mutableStateOf<InkBoard?>(null) }
+    var renameDocument by remember { mutableStateOf<InkBoard?>(null) }
+    var moveDocument by remember { mutableStateOf<InkBoard?>(null) }
+    var trashDocument by remember { mutableStateOf<InkBoard?>(null) }
     fun job(block: suspend () -> String) {
         if(busy) return
         busy=true
@@ -54,6 +58,14 @@ fun WorkspaceDialogs(vm: EditorViewModel) {
     val pdf=rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/pdf")) { uri ->
         val board=exportingBoard
         if(uri!=null && board!=null) job { withContext(Dispatchers.IO) { DocumentTransfer(context).pdf(board,exportIndices,uri) }; "PDF сохранён" }
+    }
+    val png=rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("image/png")) { uri ->
+        val board=exportingBoard
+        if(uri!=null && board!=null) job { DocumentExporter(context).png(board, exportIndices.firstOrNull() ?: 0, uri); "PNG сохранён" }
+    }
+    val portable=rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/octet-stream")) { uri ->
+        val board=exportingBoard
+        if(uri!=null && board!=null) job { withContext(Dispatchers.IO) { InkLabPackage(context).write(listOf(board), vm.folders.toList(), uri) }; "Документ .inklab сохранён" }
     }
     val backup=rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/zip")) { uri ->
         if(uri!=null) {
@@ -72,17 +84,32 @@ fun WorkspaceDialogs(vm: EditorViewModel) {
     if(vm.documentActions) Sheet("Документ",{ vm.documentActions=false }) {
         val board=vm.currentBoard
         if(board!=null) {
-            Action("Языки распознавания · ${Locale.forLanguageTag(board.languageTag).getDisplayName(Locale.forLanguageTag("ru"))}") { vm.documentActions=false; vm.languagePanel=true }
-            Action(if(board.favorite) "Убрать из избранного" else "Добавить в избранное") { vm.toggleFavorite(board.id) }
-            Text("Переместить в папку",style=MaterialTheme.typography.labelLarge)
-            Row(Modifier.horizontalScroll(rememberScrollState())) {
-                TextButton(onClick={vm.moveDocument(board.id,null)}) { Text("Все файлы") }
-                vm.folders.forEach { folder -> TextButton(onClick={vm.moveDocument(board.id,folder.id)}) { Text(folder.title) } }
-            }
-            Action("Экспорт документа в PDF") { exportingBoard=vm.allDocuments().first { it.id==board.id }; exportIndices=board.pages.indices.toList(); pdf.launch("${board.title}.pdf") }
-            if(board.format == DocumentFormat.NOTEBOOK) Action("Экспорт текущей страницы в PDF") { exportingBoard=vm.allDocuments().first { it.id==board.id }; exportIndices=listOf(vm.currentPageIndex); pdf.launch("${board.title}-${vm.currentPageIndex+1}.pdf") }
+            Text(board.title, style=MaterialTheme.typography.titleMedium, fontWeight=androidx.compose.ui.text.font.FontWeight.SemiBold)
+            Text(if(board.format == DocumentFormat.NOTEBOOK) "Тетрадь · ${board.pages.size} стр." else "Бесконечная доска", color=InkColors.Muted)
+            HorizontalDivider()
+            Text("Свойства и организация",style=MaterialTheme.typography.labelLarge,color=InkColors.Muted)
+            Action("Переименовать") { vm.documentActions=false; renameDocument=board }
+            Action("Параметры бумаги и документа") { vm.documentActions=false; vm.navigate(dev.swart.inklab.ui.AppScreen.BOARD_SETTINGS) }
+            Action("Язык распознавания · ${Locale.forLanguageTag(board.languageTag).getDisplayName(Locale.forLanguageTag("ru"))}") { vm.documentActions=false; vm.languagePanel=true }
+            Action(if(board.favorite) "★ Убрать из избранного" else "☆ Добавить в избранное") { vm.toggleFavorite(board.id) }
+            Action("Переместить в папку…") { vm.documentActions=false; moveDocument=board }
+            Action("Создать копию") { vm.duplicateDocument(board.id); vm.documentActions=false; message="Копия документа создана в текущей папке" }
+            HorizontalDivider()
+            Text("Экспорт",style=MaterialTheme.typography.labelLarge,color=InkColors.Muted)
+            Action("PDF · весь документ") { exportingBoard=vm.allDocuments().first { it.id==board.id }; exportIndices=board.pages.indices.toList(); vm.documentActions=false; pdf.launch("${board.title}.pdf") }
+            if(board.format == DocumentFormat.NOTEBOOK) Action("PDF · текущая страница") { exportingBoard=vm.allDocuments().first { it.id==board.id }; exportIndices=listOf(vm.currentPageIndex); vm.documentActions=false; pdf.launch("${board.title}-${vm.currentPageIndex+1}.pdf") }
+            Action("PNG · текущая страница") { exportingBoard=vm.allDocuments().first { it.id==board.id }; exportIndices=listOf(vm.currentPageIndex); vm.documentActions=false; png.launch("${board.title}-${vm.currentPageIndex+1}.png") }
+            Action("Редактируемый файл .inklab") { exportingBoard=vm.allDocuments().first { it.id==board.id }; vm.documentActions=false; portable.launch("${board.title}.inklab") }
+            HorizontalDivider()
+            Action("Переместить в корзину") { vm.documentActions=false; trashDocument=board }
         }
     }
+    renameDocument?.let { board ->
+        var value by remember(board.id) { mutableStateOf(board.title) }
+        AlertDialog(onDismissRequest={renameDocument=null},title={Text("Переименовать документ")},text={OutlinedTextField(value,{value=it},singleLine=true,label={Text("Название")})},confirmButton={TextButton(enabled=value.isNotBlank(),onClick={vm.renameBoard(board.id,value.trim());renameDocument=null}){Text("Сохранить")}},dismissButton={TextButton(onClick={renameDocument=null}){Text("Отмена")}})
+    }
+    moveDocument?.let { board -> DocumentFolderPickerDialog(board,vm.folders,{moveDocument=null}) { folderId -> vm.moveDocument(board.id,folderId);moveDocument=null } }
+    trashDocument?.let { board -> AlertDialog(onDismissRequest={trashDocument=null},title={Text("Переместить в корзину?")},text={Text("«${board.title}» можно будет восстановить из корзины библиотеки.")},confirmButton={TextButton(onClick={trashDocument=null;vm.deleteBoard(board.id)}){Text("В корзину")}},dismissButton={TextButton(onClick={trashDocument=null}){Text("Отмена")}}) }
     if(vm.libraryTools) Sheet("Резервные копии",{ vm.libraryTools=false }) {
         Action("Сохранить резервную копию с аудио") { backup.launch("InkLab-backup.zip") }
         Action("Восстановить из резервной копии") { restore.launch(arrayOf("application/zip","application/octet-stream")) }
