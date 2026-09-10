@@ -2,6 +2,7 @@ package dev.swart.inklab.core.input
 
 import android.os.Build
 import android.view.MotionEvent
+import android.view.VelocityTracker
 import androidx.compose.ui.geometry.Offset
 import dev.swart.inklab.core.model.InkPoint
 import dev.swart.inklab.ui.CanvasInputSource
@@ -24,6 +25,7 @@ class CanvasInputController(private val vm: EditorViewModel, private val slop: F
     private var touchSelectionDragging = false
     private var suppressPenUntilUp = false
     private var previous = emptyMap<Int, Offset>()
+    private var velocityTracker: VelocityTracker? = null
 
     fun hover(event: MotionEvent) {
         stylusButton.observePressedFlag(hasStylusButton(event.buttonState), event.eventTime)
@@ -53,6 +55,8 @@ class CanvasInputController(private val vm: EditorViewModel, private val slop: F
         touchSelectionDragging = false
         suppressPenUntilUp = false
         stylusButton.reset()
+        velocityTracker?.recycle()
+        velocityTracker = null
     }
 
     fun event(e: MotionEvent): Boolean {
@@ -100,6 +104,9 @@ class CanvasInputController(private val vm: EditorViewModel, private val slop: F
             }
         }
         if (action == MotionEvent.ACTION_DOWN) {
+            vm.stopViewportMotion()
+            velocityTracker?.recycle()
+            velocityTracker = VelocityTracker.obtain().also { it.addMovement(e) }
             tap = TwoFingerTap(slop)
             previous = emptyMap()
             touchCount = 0
@@ -212,11 +219,14 @@ class CanvasInputController(private val vm: EditorViewModel, private val slop: F
         }
 
         val points = (0 until e.pointerCount).associate { e.getPointerId(it) to Offset(e.getX(it), e.getY(it)) }
+        if (action != MotionEvent.ACTION_DOWN) velocityTracker?.addMovement(e)
         if (action == MotionEvent.ACTION_DOWN || action == MotionEvent.ACTION_POINTER_DOWN) {
             val i = e.actionIndex
             tap.down(e.getPointerId(i), e.getX(i), e.getY(i), e.eventTime)
             touchCount++
             if (touchCount > 1) {
+                velocityTracker?.recycle()
+                velocityTracker = null
                 touchSelectionDragCandidate = false
                 if (touchSelectionDragging) {
                     vm.cancelInput()
@@ -265,6 +275,7 @@ class CanvasInputController(private val vm: EditorViewModel, private val slop: F
             }
         }
         if (action == MotionEvent.ACTION_UP) {
+            val selectionWasDragging = touchSelectionDragging
             if (touchSelectionDragging) {
                 vm.finishLasso()
                 vm.endInput()
@@ -280,6 +291,14 @@ class CanvasInputController(private val vm: EditorViewModel, private val slop: F
                     }
                 }
             }
+            if (!touchBlocked && !canceled && dragged && touchCount == 1 && !selectionWasDragging) {
+                velocityTracker?.apply {
+                    computeCurrentVelocity(1000, 8_000f)
+                    vm.flingViewport(Offset(xVelocity, yVelocity))
+                }
+            }
+            velocityTracker?.recycle()
+            velocityTracker = null
             vm.flush()
             previous = emptyMap()
             touchSelectionDragCandidate = false

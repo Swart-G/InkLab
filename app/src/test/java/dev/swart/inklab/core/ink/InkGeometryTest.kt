@@ -83,6 +83,14 @@ class InkGeometryTest {
         assertSame(input, autoRecognizeShape(input))
     }
 
+    @Test
+    fun visibleShapePreviewCommitsOnlyWithoutLaterMovement() {
+        val points = listOf(InkPoint(0f, 0f, 10L), InkPoint(100f, 0f, 20L))
+        assertTrue(shapePreviewMatches(20L, points))
+        assertFalse(shapePreviewMatches(10L, points))
+        assertFalse(shapePreviewMatches(null, points))
+    }
+
     private fun stroke(points: List<Offset>) = InkStroke(
         points = points.mapIndexed { index, point -> InkPoint(point.x, point.y, index.toLong()) }
     )

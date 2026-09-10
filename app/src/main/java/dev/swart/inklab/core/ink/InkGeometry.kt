@@ -136,6 +136,10 @@ fun autoRecognizeShape(stroke: InkStroke): InkStroke {
     return stroke
 }
 
+/** A visible shape preview is committed only while it still describes the final input sample. */
+fun shapePreviewMatches(previewTimestamp: Long?, points: List<InkPoint>): Boolean =
+    previewTimestamp != null && previewTimestamp == points.lastOrNull()?.timestamp
+
 /** Removes only the touched portions and returns the remaining stroke fragments. */
 fun splitStrokeByCircle(stroke: InkStroke, center: Offset, radius: Float): List<InkStroke> {
     if (stroke.points.size < 2) return if (strokeIntersectsCircle(stroke, center, radius)) emptyList() else listOf(stroke)

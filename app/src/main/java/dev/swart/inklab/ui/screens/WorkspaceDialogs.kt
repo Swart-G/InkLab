@@ -68,6 +68,7 @@ fun WorkspaceDialogs(vm: EditorViewModel) {
             "Восстановлено документов: ${imported.boards.size}. Они добавлены как копии."
         }
     }
+    if (vm.cloudPanel) CloudBackupSettingsDialog(vm.boards) { vm.cloudPanel = false }
     if(vm.documentActions) Sheet("Документ",{ vm.documentActions=false }) {
         val board=vm.currentBoard
         if(board!=null) {

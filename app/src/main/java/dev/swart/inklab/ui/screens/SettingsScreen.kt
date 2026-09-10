@@ -18,6 +18,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ArrowBack
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -26,19 +28,32 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import dev.swart.inklab.core.storage.EraserMode
 import dev.swart.inklab.core.storage.StylusButtonAction
+import dev.swart.inklab.core.update.AppUpdater
 import dev.swart.inklab.ui.EditorViewModel
 import dev.swart.inklab.ui.theme.InkColors
+import kotlinx.coroutines.launch
 
 @Composable
 fun SettingsScreen(vm: EditorViewModel, onBack: () -> Unit) {
     BackHandler(onBack = onBack)
     val preferences = vm.inputPreferences
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val updater = remember(context) { AppUpdater(context.applicationContext) }
+    var updateBusy by remember { mutableStateOf(false) }
+    var updateMessage by remember { mutableStateOf<String?>(null) }
     Column(Modifier.fillMaxSize().background(InkColors.Paper).padding(24.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             IconButton(onClick = onBack) { Icon(Icons.Outlined.ArrowBack, "Назад") }
@@ -106,7 +121,36 @@ fun SettingsScreen(vm: EditorViewModel, onBack: () -> Unit) {
                 }
             }
             item { Action("Языковые пакеты распознавания") { vm.languagePanel = true } }
-            item { Action("Резервные копии") { vm.libraryTools = true } }
+            item {
+                SettingsCard("Данные и перенос", "Обновление поверх установленной версии сохраняет данные") {
+                    Action("Создать переносимую резервную копию") { vm.libraryTools = true }
+                    Text(
+                        "Android Auto Backup включён, но облачный системный архив ограничен размером устройства. Перед удалением приложения сохраните явную копию — приватные данные после удаления нельзя гарантированно оставить на устройстве.",
+                        color = InkColors.Muted,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+            }
+            item {
+                SettingsCard("Обновление приложения", "Проверка подписи и SHA-256 перед системной установкой") {
+                    Action(if (updateBusy) "Проверяем…" else "Проверить обновления") {
+                        if (!updateBusy) scope.launch {
+                            updateBusy = true
+                            runCatching {
+                                val update = updater.check() ?: return@runCatching "Установлена актуальная версия"
+                                val apk = updater.download(update)
+                                context.startActivity(updater.installIntent(apk))
+                                if (android.os.Build.VERSION.SDK_INT >= 26 && !context.packageManager.canRequestPackageInstalls()) {
+                                    "Разрешите установку из InkLab, затем нажмите «Проверить обновления» ещё раз"
+                                } else "Обновление ${update.version} передано системному установщику"
+                            }.onSuccess { updateMessage = it }
+                                .onFailure { updateMessage = it.message ?: "Не удалось проверить обновление" }
+                            updateBusy = false
+                        }
+                    }
+                    if (updateBusy) CircularProgressIndicator()
+                }
+            }
             item {
                 SettingsCard("Оформление", "Комфортный вид днём и вечером") {
                     SettingSwitch("Как в системе", "Автоматически выбирать тему Android", preferences.systemTheme) {
@@ -121,6 +165,13 @@ fun SettingsScreen(vm: EditorViewModel, onBack: () -> Unit) {
                 }
             }
         }
+    }
+    updateMessage?.let { message ->
+        AlertDialog(
+            onDismissRequest = { updateMessage = null },
+            text = { Text(message) },
+            confirmButton = { androidx.compose.material3.TextButton(onClick = { updateMessage = null }) { Text("ОК") } }
+        )
     }
 }
 

@@ -11,6 +11,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
@@ -40,7 +41,12 @@ import dev.swart.inklab.core.model.DocumentFormat
 import dev.swart.inklab.core.model.InkPoint
 import dev.swart.inklab.core.model.InkStroke
 import dev.swart.inklab.core.model.PageStripLayout
+import dev.swart.inklab.core.model.PageBackgroundKind
 import dev.swart.inklab.core.model.PaperPattern
+import dev.swart.inklab.core.render.DecodedPageBitmap
+import dev.swart.inklab.core.render.PageBitmapDecoder
+import dev.swart.inklab.core.render.PageRenderKey
+import dev.swart.inklab.core.storage.AssetStore
 import dev.swart.inklab.ui.EditorTool
 import dev.swart.inklab.ui.EditorViewModel
 import dev.swart.inklab.ui.theme.InkColors
@@ -81,6 +87,52 @@ fun EditorCanvas(vm: EditorViewModel, modifier: Modifier = Modifier) {
         }
     }
     val strokeRenderCache = remember(vm.currentBoardId) { StrokeRenderCache() }
+    val backgroundDecoder = remember(context) { PageBitmapDecoder(AssetStore(context)) }
+    val decodedBackgrounds = remember(vm.currentBoardId) { mutableStateMapOf<String, Pair<PageRenderKey, DecodedPageBitmap>>() }
+    DisposableEffect(decodedBackgrounds) {
+        onDispose {
+            decodedBackgrounds.values.forEach { (_, decoded) -> if (!decoded.bitmap.isRecycled) decoded.bitmap.recycle() }
+            decodedBackgrounds.clear()
+        }
+    }
+    LaunchedEffect(
+        vm.currentBoardId,
+        vm.currentBoard?.pages,
+        vm.currentPageIndex,
+        vm.viewportScale,
+        vm.viewportOffset,
+        vm.viewportWidth,
+        vm.viewportHeight
+    ) {
+        val board = vm.currentBoard ?: return@LaunchedEffect
+        val candidates = if (board.format == DocumentFormat.NOTEBOOK) {
+            val layout = PageStripLayout.from(board.pages)
+            board.pages.indices.filter { index ->
+                val placement = layout.placement(index) ?: return@filter false
+                val top = placement.stripTop * vm.viewportScale + vm.viewportOffset.y
+                val bottom = (placement.stripTop + placement.height) * vm.viewportScale + vm.viewportOffset.y
+                bottom >= -vm.viewportHeight && top <= vm.viewportHeight * 2f
+            }
+        } else listOf(vm.currentPageIndex)
+        val desiredIds = candidates.mapTo(mutableSetOf()) { board.pages[it].id }
+        decodedBackgrounds.keys.filter { it !in desiredIds }.forEach { pageId ->
+            decodedBackgrounds.remove(pageId)?.second?.bitmap?.let { if (!it.isRecycled) it.recycle() }
+        }
+        candidates.forEach { index ->
+            val page = board.pages[index]
+            val background = page.background ?: return@forEach
+            if (background.kind !in setOf(PageBackgroundKind.PDF, PageBackgroundKind.IMAGE)) return@forEach
+            val assetId = background.assetId ?: return@forEach
+            val targetWidth = PageBitmapDecoder.bucket((page.width * vm.viewportScale).toInt().coerceAtLeast(1))
+            val targetHeight = PageBitmapDecoder.bucket((page.height * vm.viewportScale).toInt().coerceAtLeast(1))
+            val key = PageRenderKey(assetId, background.sourcePageIndex ?: 0, targetWidth, targetHeight)
+            if (decodedBackgrounds[page.id]?.first == key) return@forEach
+            val decoded = runCatching { backgroundDecoder.decode(page, targetWidth, targetHeight) }.getOrNull() ?: return@forEach
+            decodedBackgrounds.put(page.id, key to decoded)?.second?.bitmap?.let { old ->
+                if (old !== decoded.bitmap && !old.isRecycled) old.recycle()
+            }
+        }
+    }
     var shapePreview by remember { mutableStateOf<InkStroke?>(null) }
     val lastPointTimestamp = vm.currentPoints.lastOrNull()?.timestamp
 
@@ -101,7 +153,10 @@ fun EditorCanvas(vm: EditorViewModel, modifier: Modifier = Modifier) {
             ) {
                 val raw = InkStroke(points = vm.currentPoints.toList(), width = vm.penWidth, color = vm.penColor)
                 val corrected = autoRecognizeShape(raw)
-                if (corrected.points != raw.points) shapePreview = corrected
+                if (corrected.points != raw.points) {
+                    shapePreview = corrected
+                    vm.markShapePreviewReady(lastPointTimestamp)
+                }
             }
         }
     }
@@ -163,7 +218,17 @@ fun EditorCanvas(vm: EditorViewModel, modifier: Modifier = Modifier) {
                         Offset(worldLeft, worldTop),
                         androidx.compose.ui.geometry.Size(worldRight - worldLeft, worldBottom - worldTop)
                     )
-                    when (pageSettings.pattern) {
+                    val importedBackground = decodedBackgrounds[page.id]?.second
+                    if (importedBackground != null && !importedBackground.bitmap.isRecycled) {
+                        drawIntoCanvas { canvas ->
+                            canvas.nativeCanvas.drawBitmap(
+                                importedBackground.bitmap,
+                                importedBackground.bitmapToPage,
+                                android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG or android.graphics.Paint.FILTER_BITMAP_FLAG)
+                            )
+                        }
+                    }
+                    when (if (importedBackground == null) pageSettings.pattern else PaperPattern.BLANK) {
                         PaperPattern.RULED -> {
                             var y = floor(worldTop / spacing) * spacing
                             while (y < worldBottom) {

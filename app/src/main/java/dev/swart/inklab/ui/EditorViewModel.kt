@@ -23,6 +23,7 @@ import dev.swart.inklab.core.ink.splitStrokeByCircle
 import dev.swart.inklab.core.ink.strokeBounds
 import dev.swart.inklab.core.ink.strokeHitTest
 import dev.swart.inklab.core.ink.strokeIntersectsCircle
+import dev.swart.inklab.core.ink.shapePreviewMatches
 import dev.swart.inklab.core.model.BoardSettings
 import dev.swart.inklab.core.model.ConvertedInkKind
 import dev.swart.inklab.core.model.ConvertedInkObject
@@ -102,6 +103,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     var libraryTools by mutableStateOf(false)
     var documentActions by mutableStateOf(false)
     var trashPanel by mutableStateOf(false)
+    var cloudPanel by mutableStateOf(false)
     var settingsOrigin = AppScreen.BOARDS
     var audioPanel by mutableStateOf(false)
     var languagePanel by mutableStateOf(false)
@@ -141,6 +143,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     var stylusInContact by mutableStateOf(false)
         private set
     var eraserCursor by mutableStateOf<Offset?>(null)
+    private var shapePreviewTimestamp: Long? = null
 
     private val history = DocumentHistory()
     private var eraserGestureChanged = false
@@ -148,6 +151,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     private var movingConverted = false
     private var lastSelectionPoint = Offset.Zero
     private var saveJob: Job? = null
+    private var viewportFlingJob: Job? = null
 
     val currentBoard: InkBoard?
         get() = boards.firstOrNull { it.id == currentBoardId }
@@ -500,6 +504,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         history.cancelPending()
         inputSnapshot?.let { restore(it) }
         currentPoints.clear(); lassoPoints.clear(); eraserCursor = null
+        shapePreviewTimestamp = null
         movingSelection = false; movingConverted = false; eraserGestureChanged = false
         inputSnapshot = null
         setStylusContact(false)
@@ -540,12 +545,38 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun panBy(delta: Offset) {
+        stopViewportMotion()
+        applyPan(delta)
+    }
+
+    private fun applyPan(delta: Offset) {
         viewportOffset += delta
         constrainViewport()
         if (notebook) pageAt(Offset(viewportWidth / 2, viewportHeight / 2))?.let { activatePage(it) }
     }
+
+    fun flingViewport(initialVelocity: Offset) {
+        viewportFlingJob?.cancel()
+        val speed = initialVelocity.getDistance()
+        if (speed < 180f) return
+        val limited = if (speed > 8_000f) initialVelocity * (8_000f / speed) else initialVelocity
+        viewportFlingJob = viewModelScope.launch {
+            var velocity = limited
+            while (velocity.getDistance() >= 24f) {
+                applyPan(velocity * 0.016f)
+                velocity *= 0.90f
+                delay(16L)
+            }
+        }
+    }
+
+    fun stopViewportMotion() {
+        viewportFlingJob?.cancel()
+        viewportFlingJob = null
+    }
     fun flush() { persistCurrentBoard() }
     fun zoomBy(factor: Float, centroid: Offset) {
+        stopViewportMotion()
         val anchor = (centroid - viewportOffset) / viewportScale
         viewportScale = (viewportScale * factor).coerceIn(if (notebook) fitScale() * 0.5f else 0.2f, 6f)
         viewportOffset = centroid - anchor * viewportScale
@@ -597,6 +628,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun startStroke(point: InkPoint) {
+        shapePreviewTimestamp = null
         selectedConvertedId = null
         currentPoints.clear()
         currentPoints += point
@@ -611,6 +643,7 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         val delta = point.offset() - previous.offset()
         val distance = delta.getDistance()
         if (distance < 0.7f) return
+        shapePreviewTimestamp = null
         val parts = (distance / 2.5f).toInt().coerceIn(1, 16)
         for (part in 1..parts) {
             val fraction = part.toFloat() / parts
@@ -627,16 +660,24 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
         if (currentPoints.isNotEmpty()) {
             pushUndo()
             val stroke = InkStroke(points = currentPoints.toList(), width = penWidth, color = penColor)
-            val finished = if (inputPreferences.autoShapes && snapToShape) autoRecognizeShape(stroke) else stroke
+            val previewStillMatches = shapePreviewMatches(shapePreviewTimestamp, currentPoints)
+            val finished = if (inputPreferences.autoShapes && (snapToShape || previewStillMatches)) autoRecognizeShape(stroke) else stroke
             val page = currentBoard?.pages?.getOrNull(currentPageIndex)
             strokes += if (notebook && page != null) dev.swart.inklab.core.ink.clipStrokeToPage(finished, Rect(page.originX,page.originY,page.originX+page.width,page.originY+page.height)) else listOf(finished)
             selectedIds = emptySet()
             persistCurrentBoard()
         }
         currentPoints.clear()
+        shapePreviewTimestamp = null
     }
 
-    fun cancelStroke() { currentPoints.clear() }
+    fun markShapePreviewReady(lastPointTimestamp: Long) {
+        if (stylusInContact && currentPoints.lastOrNull()?.timestamp == lastPointTimestamp) {
+            shapePreviewTimestamp = lastPointTimestamp
+        }
+    }
+
+    fun cancelStroke() { currentPoints.clear(); shapePreviewTimestamp = null }
 
     fun beginErase() { eraserGestureChanged = false; selectedConvertedId = null }
 
@@ -873,13 +914,25 @@ class EditorViewModel(application: Application) : AndroidViewModel(application) 
 
     fun cancelEditConverted() { editingConvertedId = null }
 
-    fun updateConvertedContent(content: String) {
+    fun updateConvertedContent(content: String, textSize: Float? = null, color: Color? = null, width: Float? = null) {
         val id = editingConvertedId ?: return
         val index = convertedObjects.indexOfFirst { it.id == id }
         if (index < 0 || content.isBlank()) return
         pushUndo()
         val item = convertedObjects[index]
-        convertedObjects[index] = item.copy(content = content, height = if (item.kind == ConvertedInkKind.TEXT) textHeight(content,item.textSize,item.width) else item.height)
+        val nextSize = textSize?.coerceIn(12f, 128f) ?: item.textSize
+        val nextWidth = width?.coerceIn(80f, 1_600f) ?: item.width
+        convertedObjects[index] = item.copy(
+            content = content,
+            textSize = nextSize,
+            color = color ?: item.color,
+            width = nextWidth,
+            height = if (item.kind == ConvertedInkKind.TEXT) {
+                textHeight(content, nextSize, nextWidth)
+            } else {
+                (item.height * (nextSize / item.textSize.coerceAtLeast(1f))).coerceAtLeast(nextSize * 1.25f)
+            }
+        )
         editingConvertedId = null
         selectedConvertedId = id
         persistCurrentBoard()

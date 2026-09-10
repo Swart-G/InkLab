@@ -16,9 +16,12 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.rememberScrollState
@@ -45,6 +48,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -86,6 +90,7 @@ fun BoardsScreen(vm: EditorViewModel) {
     var creatingFolder by remember { mutableStateOf(false) }
     var importingLabel by remember { mutableStateOf<String?>(null) }
     var importError by remember { mutableStateOf<String?>(null) }
+    var movingBoardId by remember { mutableStateOf<String?>(null) }
 
     val context = LocalContext.current.applicationContext
     val importService = remember(context) { DocumentImportService(context) }
@@ -155,6 +160,7 @@ fun BoardsScreen(vm: EditorViewModel) {
                     IconButton(onClick = { libraryMenu = true }) { Icon(Icons.Outlined.MoreVert, "Действия библиотеки") }
                     DropdownMenu(expanded = libraryMenu, onDismissRequest = { libraryMenu = false }) {
                         DropdownMenuItem(text = { Text("Резервные копии") }, onClick = { libraryMenu = false; vm.libraryTools = true })
+                        DropdownMenuItem(text = { Text("Google Drive · preview") }, onClick = { libraryMenu = false; vm.cloudPanel = true })
                         DropdownMenuItem(text = { Text("Корзина") }, onClick = { libraryMenu = false; vm.trashPanel = true })
                     }
                 }
@@ -200,7 +206,8 @@ fun BoardsScreen(vm: EditorViewModel) {
                                 if (query.isNotBlank()) board.pages.indexOfFirst { page -> page.convertedObjects.any { it.content.contains(query, true) } }.takeIf { it >= 0 }?.let(vm::openPage)
                             },
                             onRename = { vm.renameBoard(board.id, it) },
-                            onDelete = { vm.deleteBoard(board.id) }
+                            onDelete = { vm.deleteBoard(board.id) },
+                            onMove = { movingBoardId = board.id }
                         )
                     }
                 }
@@ -276,6 +283,14 @@ fun BoardsScreen(vm: EditorViewModel) {
             confirmButton = {}
         )
     }
+    movingBoardId?.let { boardId ->
+        vm.boards.firstOrNull { it.id == boardId }?.let { board ->
+            FolderPickerDialog(board, vm.folders, { movingBoardId = null }) { folderId ->
+                vm.moveDocument(boardId, folderId)
+                movingBoardId = null
+            }
+        }
+    }
     importError?.let { message ->
         AlertDialog(
             onDismissRequest = { importError = null },
@@ -292,7 +307,8 @@ private fun BoardCard(
     active: Boolean,
     onOpen: () -> Unit,
     onRename: (String) -> Unit,
-    onDelete: () -> Unit
+    onDelete: () -> Unit,
+    onMove: () -> Unit
 ) {
     val strokeCount = board.pages.sumOf { it.strokes.size }
     val updated = DateFormat.getDateInstance(DateFormat.MEDIUM).format(Date(board.updatedAt))
@@ -338,6 +354,11 @@ private fun BoardCard(
                             onClick = { menu = false; rename = true }
                         )
                         DropdownMenuItem(
+                            text = { Text("Переместить в папку…") },
+                            leadingIcon = { Icon(Icons.Outlined.Folder, null) },
+                            onClick = { menu = false; onMove() }
+                        )
+                        DropdownMenuItem(
                             text = { Text("Удалить") },
                             leadingIcon = { Icon(Icons.Outlined.DeleteOutline, null) },
                             onClick = { menu = false; delete = true }
@@ -358,6 +379,54 @@ private fun BoardCard(
         text = { Text("«${board.title}» будет перемещён в корзину. Его можно восстановить из меню библиотеки.") },
         confirmButton = { TextButton(onClick = { delete = false; onDelete() }) { Text("Удалить") } },
         dismissButton = { TextButton(onClick = { delete = false }) { Text("Отмена") } }
+    )
+}
+
+@Composable
+private fun FolderPickerDialog(
+    board: InkBoard,
+    folders: List<InkFolder>,
+    dismiss: () -> Unit,
+    select: (String?) -> Unit
+) {
+    fun folderPath(folder: InkFolder): String {
+        val names = mutableListOf(folder.title)
+        val visited = mutableSetOf(folder.id)
+        var parentId = folder.parentId
+        while (parentId != null && visited.add(parentId)) {
+            val parent = folders.firstOrNull { it.id == parentId } ?: break
+            names += parent.title
+            parentId = parent.parentId
+        }
+        return names.asReversed().joinToString(" / ")
+    }
+    AlertDialog(
+        onDismissRequest = dismiss,
+        title = { Text("Переместить «${board.title}»") },
+        text = {
+            LazyColumn(Modifier.heightIn(max = 420.dp)) {
+                item {
+                    Row(
+                        Modifier.fillMaxWidth().clickable { select(null) }.padding(vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        RadioButton(board.folderId == null, onClick = null)
+                        Text("Все файлы", Modifier.padding(start = 8.dp))
+                    }
+                }
+                items(folders.sortedBy(::folderPath), key = { it.id }) { folder ->
+                    Row(
+                        Modifier.fillMaxWidth().clickable { select(folder.id) }.padding(vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        RadioButton(board.folderId == folder.id, onClick = null)
+                        Text(folderPath(folder), Modifier.padding(start = 8.dp), maxLines = 2)
+                    }
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = { TextButton(onClick = dismiss) { Text("Отмена") } }
     )
 }
 

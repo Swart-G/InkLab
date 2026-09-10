@@ -9,6 +9,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -93,6 +94,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.zIndex
 import dev.swart.inklab.R
 import dev.swart.inklab.core.model.ConvertedInkKind
+import dev.swart.inklab.core.model.ConvertedInkObject
 import dev.swart.inklab.core.model.DocumentFormat
 import dev.swart.inklab.core.model.PaperPattern
 import dev.swart.inklab.core.recognition.RecognitionMode
@@ -190,7 +192,7 @@ fun EditorScreen(vm: EditorViewModel) {
                     .padding(top = if (focusMode) 64.dp else 116.dp)
                     .zIndex(10f)
             )
-            vm.editingConvertedObject?.let { EditConvertedDialog(vm, it.kind, it.content) }
+            vm.editingConvertedObject?.let { EditConvertedDialog(vm, it) }
         }
     }
 }
@@ -685,18 +687,31 @@ private fun RecognitionStatus(vm: EditorViewModel, modifier: Modifier = Modifier
 }
 
 @Composable
-private fun EditConvertedDialog(vm: EditorViewModel, kind: ConvertedInkKind, initial: String) {
-    var value by remember(initial) { mutableStateOf(initial) }
+private fun EditConvertedDialog(vm: EditorViewModel, item: ConvertedInkObject) {
+    var value by remember(item.id) { mutableStateOf(item.content) }
+    var textSize by remember(item.id) { mutableFloatStateOf(item.textSize) }
+    var objectWidth by remember(item.id) { mutableFloatStateOf(item.width) }
+    var color by remember(item.id) { mutableStateOf(item.color) }
     AlertDialog(
         onDismissRequest = vm::cancelEditConverted,
-        title = { Text(if (kind == ConvertedInkKind.MATH) "Редактировать LaTeX" else "Редактировать текст") },
+        title = { Text(if (item.kind == ConvertedInkKind.MATH) "Формула и оформление" else "Текст и оформление") },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedTextField(value, { value = it }, modifier = Modifier.fillMaxWidth(), minLines = if (kind == ConvertedInkKind.MATH) 2 else 3)
-                if (kind == ConvertedInkKind.MATH) Text("Формула перерисуется после сохранения.", color = InkColors.Muted, style = MaterialTheme.typography.bodySmall)
+            Column(Modifier.verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                OutlinedTextField(value, { value = it }, modifier = Modifier.fillMaxWidth(), minLines = if (item.kind == ConvertedInkKind.MATH) 2 else 3)
+                Text("Размер · ${textSize.toInt()}", style = MaterialTheme.typography.labelLarge)
+                Slider(textSize, { textSize = it }, valueRange = 12f..96f, steps = 20)
+                Text("Ширина блока · ${objectWidth.toInt()}", style = MaterialTheme.typography.labelLarge)
+                Slider(objectWidth, { objectWidth = it }, valueRange = 120f..900f, steps = 25)
+                Text("Цвет", style = MaterialTheme.typography.labelLarge)
+                Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    penPalette.forEach { candidate ->
+                        ColorDot(candidate, color, 40.dp) { color = candidate }
+                    }
+                }
+                if (item.kind == ConvertedInkKind.MATH) Text("Формула перерисуется после сохранения.", color = InkColors.Muted, style = MaterialTheme.typography.bodySmall)
             }
         },
-        confirmButton = { TextButton(enabled = value.isNotBlank(), onClick = { vm.updateConvertedContent(value) }) { Text("Сохранить") } },
+        confirmButton = { TextButton(enabled = value.isNotBlank(), onClick = { vm.updateConvertedContent(value, textSize, color, objectWidth) }) { Text("Сохранить") } },
         dismissButton = { TextButton(onClick = vm::cancelEditConverted) { Text("Отмена") } }
     )
 }
