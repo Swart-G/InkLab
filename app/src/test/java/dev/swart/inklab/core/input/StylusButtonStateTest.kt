@@ -22,10 +22,27 @@ class StylusButtonStateTest {
     }
 
     @Test
-    fun zeroButtonFlagDoesNotClearLatchedHoverPress() {
+    fun zeroButtonFlagDoesNotClearFreshLatchedHoverPress() {
         val state = StylusButtonState()
-        state.press()
-        state.observePressedFlag(false)
+        state.press(1_000L)
+        state.observePressedFlag(false, 1_100L)
+        assertTrue(state.pressed)
+    }
+
+    @Test
+    fun staleLatchClearsWithoutHoverExitWhenReleaseEventWasLost() {
+        val state = StylusButtonState()
+        state.press(1_000L)
+        state.observePressedFlag(false, 1_000L + StylusButtonState.OMITTED_FLAG_GRACE_MS)
+        assertFalse(state.pressed)
+    }
+
+    @Test
+    fun repeatedPositiveFlagsKeepHeldButtonLatched() {
+        val state = StylusButtonState()
+        state.press(1_000L)
+        state.observePressedFlag(true, 1_150L)
+        state.observePressedFlag(false, 1_250L)
         assertTrue(state.pressed)
     }
 

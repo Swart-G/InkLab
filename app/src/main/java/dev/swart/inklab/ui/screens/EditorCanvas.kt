@@ -16,6 +16,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathEffect
@@ -79,6 +80,7 @@ fun EditorCanvas(vm: EditorViewModel, modifier: Modifier = Modifier) {
             isSubpixelText = true
         }
     }
+    val strokeRenderCache = remember(vm.currentBoardId) { StrokeRenderCache() }
     var shapePreview by remember { mutableStateOf<InkStroke?>(null) }
     val lastPointTimestamp = vm.currentPoints.lastOrNull()?.timestamp
 
@@ -206,32 +208,39 @@ fun EditorCanvas(vm: EditorViewModel, modifier: Modifier = Modifier) {
                         )
                     }
 
-                    fun drawStroke(points: List<InkPoint>, width: Float, color: Color, selected: Boolean = false) {
-                        if (points.size == 1) drawCircle(displayInk(color), width / 2f, points.first().offset())
-                        if (points.size < 2) return
-                        points.zipWithNext().forEach { (a, b) ->
-                            val pressure = ((a.pressure + b.pressure) / 2f).coerceIn(0.15f, 1f)
-                            val segmentWidth = width * (0.55f + pressure * 0.75f)
-                            if (selected) {
-                                drawLine(
-                                    palette.Accent.copy(alpha = 0.16f),
-                                    a.offset(),
-                                    b.offset(),
-                                    segmentWidth + 10f / scale,
-                                    StrokeCap.Round
-                                )
-                            }
-                            drawLine(displayInk(color), a.offset(), b.offset(), segmentWidth, StrokeCap.Round)
+                    fun drawStroke(stroke: InkStroke, selected: Boolean = false, transient: Boolean = false) {
+                        val render = if (transient) {
+                            strokeRenderCache.buildTransient(stroke.points, stroke.width)
+                        } else {
+                            strokeRenderCache.get(stroke)
+                        }
+                        if (!render.bounds.overlaps(Rect(worldLeft, worldTop, worldRight, worldBottom))) return
+                        if (stroke.points.size == 1) {
+                            drawCircle(displayInk(stroke.color), stroke.width / 2f, stroke.points.first().offset())
+                            return
+                        }
+                        if (selected) {
+                            drawPath(
+                                render.centerline,
+                                palette.Accent.copy(alpha = 0.16f),
+                                style = Stroke(stroke.width * render.maxWidthFactor + 10f / scale, cap = StrokeCap.Round)
+                            )
+                        }
+                        render.pressurePaths.forEach { (factor, path) ->
+                            drawPath(path, displayInk(stroke.color), style = Stroke(stroke.width * factor, cap = StrokeCap.Round))
                         }
                     }
 
                     (if (active) vm.strokes else page.strokes).forEach {
-                        drawStroke(it.points, it.width, it.color, active && it.id in vm.selectedIds)
+                        drawStroke(it, active && it.id in vm.selectedIds)
                     }
                     if (active) {
                         shapePreview?.let { preview ->
-                            drawStroke(preview.points, preview.width, preview.color)
-                        } ?: drawStroke(vm.currentPoints, vm.penWidth, vm.penColor)
+                            drawStroke(preview, transient = true)
+                        } ?: drawStroke(
+                            InkStroke(points = vm.currentPoints, width = vm.penWidth, color = vm.penColor),
+                            transient = true
+                        )
                     }
 
                     (if (active) vm.convertedObjects else page.convertedObjects).forEach { item ->

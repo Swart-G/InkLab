@@ -22,10 +22,11 @@ class CanvasInputController(private val vm: EditorViewModel, private val slop: F
     private var dragged = false
     private var touchSelectionDragCandidate = false
     private var touchSelectionDragging = false
+    private var suppressPenUntilUp = false
     private var previous = emptyMap<Int, Offset>()
 
     fun hover(event: MotionEvent) {
-        stylusButton.observePressedFlag(hasStylusButton(event.buttonState))
+        stylusButton.observePressedFlag(hasStylusButton(event.buttonState), event.eventTime)
         if ((0 until event.pointerCount).any { isPen(event.getToolType(it)) }) {
             vm.stylusHover = event.actionMasked != MotionEvent.ACTION_HOVER_EXIT
             vm.lastStylusTime = event.eventTime
@@ -50,6 +51,7 @@ class CanvasInputController(private val vm: EditorViewModel, private val slop: F
         touchBlocked = true
         touchSelectionDragCandidate = false
         touchSelectionDragging = false
+        suppressPenUntilUp = false
         stylusButton.reset()
     }
 
@@ -63,14 +65,30 @@ class CanvasInputController(private val vm: EditorViewModel, private val slop: F
         // Samsung S Pen can report these while hovering, before ACTION_DOWN. Keep the button state
         // latched so the following contact starts with the temporary eraser/lasso override.
         if (action == MotionEvent.ACTION_BUTTON_PRESS && hasStylusButton(e.actionButton)) {
-            stylusButton.press()
+            stylusButton.press(e.eventTime)
             return true
         }
         if (action == MotionEvent.ACTION_BUTTON_RELEASE && hasStylusButton(e.actionButton)) {
             stylusButton.release()
+            // A temporary tool must end when the button is released, even while the nib still
+            // touches the display. Do not reinterpret the same physical contact as a pen stroke;
+            // resume the selected tool on the next ACTION_DOWN.
+            if (penId != -1 && tool != vm.tool) {
+                when (tool) {
+                    EditorTool.ERASER -> vm.finishErase()
+                    EditorTool.LASSO -> vm.finishLasso()
+                    EditorTool.PEN -> vm.finishStroke(false)
+                    null -> Unit
+                }
+                vm.setStylusContact(false)
+                vm.endInput()
+                penId = -1
+                tool = null
+                suppressPenUntilUp = true
+            }
             return true
         }
-        stylusButton.observePressedFlag(hasStylusButton(e.buttonState))
+        stylusButton.observePressedFlag(hasStylusButton(e.buttonState), e.eventTime)
 
         val canceled = Build.VERSION.SDK_INT >= 33 && e.flags and MotionEvent.FLAG_CANCELED != 0
         if (canceled) {
@@ -112,6 +130,10 @@ class CanvasInputController(private val vm: EditorViewModel, private val slop: F
                 return true
             }
             val up = (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_POINTER_UP) && e.actionIndex == index
+            if (suppressPenUntilUp) {
+                if (up) suppressPenUntilUp = false
+                return true
+            }
             val isStylus = isPen(e.getToolType(index))
             if (isStylus) vm.lastStylusTime = e.eventTime
             if (canceled && up) {
@@ -137,7 +159,7 @@ class CanvasInputController(private val vm: EditorViewModel, private val slop: F
                 if (isStylus) vm.setStylusContact(true)
                 val point = vm.screenToCanvas(screen)
                 when (tool) {
-                    EditorTool.PEN -> vm.startStroke(ink(point, e.eventTime, e.getPressure(index)))
+                    EditorTool.PEN -> vm.startStroke(ink(point, e.eventTime, e.getPressure(index), e.getAxisValue(MotionEvent.AXIS_TILT, index)))
                     EditorTool.ERASER -> {
                         vm.beginErase()
                         vm.eraserCursor = point
@@ -152,10 +174,16 @@ class CanvasInputController(private val vm: EditorViewModel, private val slop: F
                         add(
                             Offset(e.getHistoricalX(index, h), e.getHistoricalY(index, h)),
                             e.getHistoricalEventTime(h),
-                            e.getHistoricalPressure(index, h)
+                            e.getHistoricalPressure(index, h),
+                            e.getHistoricalAxisValue(MotionEvent.AXIS_TILT, index, h)
                         )
                     }
-                    add(Offset(e.getX(index), e.getY(index)), e.eventTime, e.getPressure(index))
+                    add(
+                        Offset(e.getX(index), e.getY(index)),
+                        e.eventTime,
+                        e.getPressure(index),
+                        e.getAxisValue(MotionEvent.AXIS_TILT, index)
+                    )
                 }
                 if (up) {
                     when (tool) {
@@ -261,19 +289,20 @@ class CanvasInputController(private val vm: EditorViewModel, private val slop: F
         return true
     }
 
-    private fun ink(p: Offset, t: Long, pressure: Float) = InkPoint(
+    private fun ink(p: Offset, t: Long, pressure: Float, tilt: Float) = InkPoint(
         p.x,
         p.y,
         t,
-        if (vm.inputPreferences.pressureEnabled) pressure.coerceIn(0.15f, 1f) else 0.6f
+        if (vm.inputPreferences.pressureEnabled) pressure.coerceIn(0.15f, 1f) else 0.6f,
+        tilt.coerceIn(0f, (Math.PI / 2.0).toFloat())
     )
 
-    private fun add(screen: Offset, time: Long, pressure: Float) {
+    private fun add(screen: Offset, time: Long, pressure: Float, tilt: Float) {
         val p = vm.screenToCanvas(screen)
         when (tool) {
             EditorTool.PEN -> {
                 if (vm.currentPoints.lastOrNull()?.let { (it.offset() - p).getDistance() > 0.7f } == true) lastMove = time
-                vm.addPoint(ink(p, time, pressure))
+                vm.addPoint(ink(p, time, pressure, tilt))
             }
             EditorTool.ERASER -> {
                 vm.eraserCursor = p
